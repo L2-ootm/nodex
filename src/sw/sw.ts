@@ -1,6 +1,7 @@
 // src/sw/sw.ts — Service Worker entry point
 // Phase 1: install/activate lifecycle, fetch event interception,
-// cache hit/miss/fallback with seq-number freshness validation.
+// cache hit/miss/fallback with seq-number freshness validation,
+// LRU eviction (cache.ts), and metrics emission (metrics.ts).
 //
 // Critical constraints (see RESEARCH.md Anti-Patterns, Pitfall 1, Pitfall 4):
 //   - event.respondWith() MUST be called synchronously (no await before it)
@@ -9,13 +10,17 @@
 //   - Guard opaque responses: skip cache.put() if response.type === 'opaque'
 //   - NaN guard on X-Nodex-Seq; fallback to seq=1
 //   - Cache key = new URL(request.url).pathname (not full URL — D-06)
+//
+// STRIDE mitigations:
+//   T-03-02: FLUSH_BUFFER handler validates message type before executing flush
 
 /// <reference lib="webworker" />
 
 import { getDb } from './idb.js'
 import { seedSeqMap, updateSeq, isFresh } from './freshness.js'
+import { getCachedEntry, putCachedEntry, touchAccessedAt } from './cache.js'
+import { emitMetric, flushBuffer, getNodeId } from './metrics.js'
 import {
-  CACHE_NAME,
   CACHE_URL_PREFIX,
   META_STORE,
 } from '../shared/config.js'
@@ -34,7 +39,8 @@ self.addEventListener('install', (event: ExtendableEvent) => {
 })
 
 // ---------------------------------------------------------------------------
-// Activate — claim clients, init IDB, seed in-memory seq map, prune old caches
+// Activate — claim clients, init IDB, seed in-memory seq map, generate node ID,
+//            prune old caches
 // ---------------------------------------------------------------------------
 
 async function activateSW(): Promise<void> {
@@ -53,8 +59,17 @@ async function activateSW(): Promise<void> {
     console.warn('[SW] IDB seed failed:', err)
   }
 
+  // Generate and store the persistent source_node_id UUID (D-16)
+  try {
+    await getNodeId()
+    console.log('[SW] node_id initialized')
+  } catch (err) {
+    console.warn('[SW] node_id init failed:', err)
+  }
+
   // Prune caches from older SW versions (any cache name that is not CACHE_NAME)
   try {
+    const { CACHE_NAME } = await import('../shared/config.js')
     const cacheNames = await self.caches.keys()
     await Promise.all(
       cacheNames
@@ -68,6 +83,17 @@ async function activateSW(): Promise<void> {
 
 self.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(activateSW())
+})
+
+// ---------------------------------------------------------------------------
+// Message — handle FLUSH_BUFFER from dashboard (T-03-02: validate type first)
+// ---------------------------------------------------------------------------
+
+self.addEventListener('message', (event: ExtendableMessageEvent) => {
+  // T-03-02: only process recognized message types
+  if (event.data?.type !== 'FLUSH_BUFFER') return
+
+  event.waitUntil(flushBuffer())
 })
 
 // ---------------------------------------------------------------------------
@@ -88,42 +114,30 @@ self.addEventListener('fetch', (event: FetchEvent) => {
 })
 
 // ---------------------------------------------------------------------------
-// handleRequest — cache hit/miss/stale logic with IDB metadata writes
+// handleRequest — cache hit/miss/stale logic with LRU + metrics emission
 // ---------------------------------------------------------------------------
 
 async function handleRequest(request: Request): Promise<Response> {
   const key = new URL(request.url).pathname  // D-06: cache key = pathname only
-  const cache = await self.caches.open(CACHE_NAME)
+  const start = self.performance.now()
 
-  // --- Cache lookup ---
-  const cached = await cache.match(key)
+  // --- Cache lookup using cache.ts ---
+  const cached = await getCachedEntry(key)
 
   if (cached) {
-    // Read IDB meta to get the stored seq for freshness check
-    let meta: CacheMeta | undefined
-    try {
-      const db = await getDb()
-      meta = await db.get(META_STORE, key)
-    } catch (err) {
-      console.warn('[SW] IDB meta read failed, treating as stale:', err)
-    }
-
-    const cachedSeq = meta?.seq ?? 1
+    const { response, meta } = cached
+    const cachedSeq = meta.seq
 
     if (isFresh(key, cachedSeq)) {
-      // Fresh cache hit — update accessed_at in IDB (best-effort, non-blocking)
-      try {
-        const db = await getDb()
-        if (meta) {
-          await db.put(META_STORE, { ...meta, accessed_at: Date.now() })
-        }
-      } catch (err) {
-        // QuotaExceededError or other IDB failure — silently skip (T-02-03)
-        console.warn('[SW] IDB accessed_at update failed:', err)
-      }
-      // Metrics stub: full metrics harness in Plan 03
+      // Fresh cache hit — update LRU timestamp (best-effort)
+      await touchAccessedAt(key)
+
+      // Emit sw-cache metric (D-14)
+      const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
+      await emitMetric({ type: 'sw-cache', key, latency_ms })
+
       console.log('[SW] cache-hit (fresh):', key)
-      return cached
+      return response
     }
 
     // Stale: cached seq is behind the latest known seq — fall through to server fetch
@@ -133,17 +147,17 @@ async function handleRequest(request: Request): Promise<Response> {
   }
 
   // --- Server fallback ---
-  return fetchAndCache(request, key, cache)
+  return fetchAndCache(request, key, start)
 }
 
 // ---------------------------------------------------------------------------
-// fetchAndCache — network fetch + write to Cache Storage + write IDB meta
+// fetchAndCache — network fetch + write via cache.ts + emit server-fallback metric
 // ---------------------------------------------------------------------------
 
 async function fetchAndCache(
   request: Request,
   key: string,
-  cache: Cache
+  start: number
 ): Promise<Response> {
   let response: Response
 
@@ -165,9 +179,6 @@ async function fetchAndCache(
     return response
   }
 
-  // CRITICAL: clone before cache.put(); return the original to the page
-  const responseToCache = response.clone()
-
   // Parse X-Nodex-Seq with NaN guard (T-02-01)
   const rawSeq = response.headers.get('X-Nodex-Seq')
   let seq = rawSeq ? parseInt(rawSeq, 10) : 1
@@ -175,36 +186,15 @@ async function fetchAndCache(
     seq = 1
   }
 
-  // Estimate byte size from Content-Length (fallback 500 — actual tracking in Plan 03)
-  const rawLen = response.headers.get('content-length')
-  const byteSize = rawLen ? (parseInt(rawLen, 10) || 500) : 500
-
-  // Write response to Cache Storage
-  try {
-    await cache.put(key, responseToCache)
-  } catch (err) {
-    console.warn('[SW] Cache put failed:', err)
-    // Return the original response even if caching fails
-    return response
-  }
-
-  // Write IDB metadata (T-02-03: wrap in try/catch — QuotaExceededError must not crash SW)
-  try {
-    const db = await getDb()
-    const meta: CacheMeta = {
-      path: key,
-      seq,
-      accessed_at: Date.now(),
-      byte_size: byteSize,
-    }
-    await db.put(META_STORE, meta)
-  } catch (err) {
-    // IDB write failure (QuotaExceededError etc.) — log, skip IDB write, return response
-    console.warn('[SW] IDB meta write failed (QuotaExceededError?):', err)
-  }
+  // Store in Cache Storage + IDB via cache.ts (handles LRU eviction, response.clone())
+  await putCachedEntry(key, response, seq)
 
   // Update in-memory seq map (self-seeding — D-09)
   updateSeq(key, seq)
+
+  // Emit server-fallback metric (D-14)
+  const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
+  await emitMetric({ type: 'server-fallback', key, latency_ms })
 
   console.log('[SW] server-fallback cached:', key, 'seq=', seq)
   return response
