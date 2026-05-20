@@ -4,21 +4,122 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Nodex Metrics</title>
-  <style>
-    body { font-family: monospace; padding: 1.5rem; background: #0d1117; color: #e6edf3; }
-    h1 { margin: 0 0 1rem; font-size: 1.2rem; color: #58a6ff; }
-    #status { margin-bottom: 1rem; color: #8b949e; }
-    #status.active { color: #3fb950; }
-    button { padding: 0.5rem 1rem; background: #238636; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; }
-    button:hover { background: #2ea043; }
-    #log { margin-top: 1rem; padding: 0.75rem; background: #161b22; border-radius: 4px; min-height: 4rem; font-size: 0.85rem; color: #8b949e; white-space: pre; }
-  </style>
+  <link rel="stylesheet" href="./dashboard.css" />
 </head>
 <body>
-  <h1>Nodex — Phase 1 Walking Skeleton</h1>
-  <div id="status">SW: loading...</div>
-  <button id="fetch-btn">Fetch /api/products/1</button>
-  <div id="log">Ready. Click the button to trigger a fetch.</div>
+
+  <!-- Page Header -->
+  <header class="page-header">
+    <span class="live-dot" id="live-dot" aria-label="Service Worker connection status"></span>
+    <span class="page-header__title">Nodex Metrics</span>
+    <div class="page-header__chips">
+      <span id="sw-status-chip">SW: loading...</span>
+      <span id="buffer-chip">Buffer: 0</span>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- SW not-detected banner (hidden by default) -->
+    <div class="sw-banner" id="sw-banner" hidden>
+      Service Worker not registered. Ensure sw.js is served from the page origin.
+    </div>
+
+    <!-- Hit Rate Summary -->
+    <div class="stat-cards">
+      <div class="stat-card">
+        <span class="stat-display" id="hit-rate-display">0.0%</span>
+        <span class="stat-label">Cache Hit Rate</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-display" id="fallback-display">0.0%</span>
+        <span class="stat-label">Server Fallback</span>
+      </div>
+    </div>
+
+    <!-- Event Log Table -->
+    <section class="section-panel">
+      <div class="section-panel__header">
+        <h2>Event Log</h2>
+      </div>
+
+      <!-- Empty state -->
+      <div class="empty-state" id="empty-state">
+        <p class="empty-state__heading">No events yet</p>
+        <p class="empty-state__body">Trigger a fetch request above to start recording cache decisions.</p>
+      </div>
+
+      <table class="event-table" aria-label="Cache decision events">
+        <thead>
+          <tr>
+            <th scope="col">Type</th>
+            <th scope="col">Key</th>
+            <th scope="col" class="col-right">latency_ms</th>
+            <th scope="col">source_node_id</th>
+            <th scope="col">Timestamp</th>
+          </tr>
+        </thead>
+        <tbody id="event-tbody">
+          <!-- Rows prepended by dashboard.ts -->
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Request Trigger Form -->
+    <section class="section-panel">
+      <div class="section-panel__header">
+        <h2>Request Trigger</h2>
+      </div>
+      <div class="section-panel__body">
+        <form class="trigger-form" id="fetch-form" novalidate>
+          <div class="form-row">
+            <label class="form-label" for="product-id">Product ID:</label>
+            <input
+              type="text"
+              class="input-field"
+              id="product-id"
+              name="product-id"
+              placeholder="1"
+              value="1"
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn--primary" id="fetch-btn">
+              Fetch Product
+            </button>
+          </div>
+          <span class="form-feedback form-feedback--error" id="fetch-error"></span>
+        </form>
+      </div>
+    </section>
+
+    <!-- Invalidate Trigger Form -->
+    <section class="section-panel">
+      <div class="section-panel__header">
+        <h2>Invalidate Path</h2>
+      </div>
+      <div class="section-panel__body">
+        <form class="trigger-form" id="invalidate-form" novalidate>
+          <div class="form-row">
+            <label class="form-label" for="invalidate-path">Path:</label>
+            <input
+              type="text"
+              class="input-field"
+              id="invalidate-path"
+              name="invalidate-path"
+              placeholder="/api/products/1"
+              value="/api/products/1"
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn--destructive" id="invalidate-btn">
+              Invalidate Path
+            </button>
+          </div>
+          <span class="form-feedback" id="invalidate-result"></span>
+        </form>
+      </div>
+    </section>
+
+  </main>
 
   <script type="module" src="./dashboard.ts"></script>
 </body>
