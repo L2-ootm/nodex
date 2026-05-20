@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nodex Metrics</title>
+  <style>
+    body { font-family: monospace; padding: 1.5rem; background: #0d1117; color: #e6edf3; }
+    h1 { margin: 0 0 1rem; font-size: 1.2rem; color: #58a6ff; }
+    #status { margin-bottom: 1rem; color: #8b949e; }
+    #status.active { color: #3fb950; }
+    button { padding: 0.5rem 1rem; background: #238636; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; }
+    button:hover { background: #2ea043; }
+    #log { margin-top: 1rem; padding: 0.75rem; background: #161b22; border-radius: 4px; min-height: 4rem; font-size: 0.85rem; color: #8b949e; white-space: pre; }
+  </style>
+</head>
+<body>
+  <h1>Nodex — Phase 1 Walking Skeleton</h1>
+  <div id="status">SW: loading...</div>
+  <button id="fetch-btn">Fetch /api/products/1</button>
+  <div id="log">Ready. Click the button to trigger a fetch.</div>
+
+  <script type="module" src="./dashboard.ts"></script>
+</body>
+</html>
