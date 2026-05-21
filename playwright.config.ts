@@ -28,5 +28,10 @@ export default defineConfig({
       reuseExistingServer: true,
       timeout: 120000,
     },
+    {
+      command: 'npm run signaling',
+      port: 3002,
+      reuseExistingServer: true,
+    },
   ],
 })

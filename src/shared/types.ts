@@ -31,3 +31,41 @@ export interface NodexSchema extends DBSchema {
     value: MetricsEvent
   }
 }
+
+// Phase 2 — Signaling + WebRTC message type contracts
+export type SignalingMsgType = 'JOIN' | 'JOIN_ACK' | 'PEERS_LIST' | 'OFFER' | 'ANSWER' | 'ICE_CANDIDATE' | 'LEAVE'
+
+export interface SignalingMessage {
+  type: SignalingMsgType
+  from?: string
+  to?: string
+  sdp?: { type: 'offer' | 'answer'; sdp: string }
+  candidate?: { candidate: string; sdpMid?: string; sdpMLineIndex?: number }
+  peers?: string[]
+  polite?: boolean
+}
+
+export type SwMessageType = 'GET_NODE_ID' | 'NODE_ID' | 'P2P_FETCH' | 'P2P_FETCH_RESPONSE' | 'FLUSH_BUFFER'
+
+export interface SwMessage {
+  type: SwMessageType
+  key?: string
+  nodeId?: string
+  payload?: string
+  seq?: number
+  found?: boolean
+}
+
+export interface PeerFetchRequest {
+  type: 'CACHE_FETCH_REQUEST'
+  reqId: string
+  key: string
+}
+
+export interface PeerFetchResponse {
+  type: 'CACHE_FETCH_RESPONSE'
+  reqId: string
+  found: boolean
+  payload?: string
+  seq?: number
+}

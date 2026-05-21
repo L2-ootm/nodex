@@ -6,6 +6,7 @@ export default defineConfig({
     include: [
       'src/shared/**/*.test.ts',
       'src/server/**/*.test.ts',
+      'src/p2p/**/*.test.ts',
       'src/sw/freshness.test.ts',
       'src/sw/cache.test.ts',
       'src/dashboard/dashboard.test.ts',
