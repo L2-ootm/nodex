@@ -9,7 +9,7 @@ import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
 import { createNodeWebSocket } from '@hono/node-ws'
 import type { WSContext } from 'hono/ws'
-import { SIGNALING_PORT, PEER_FANOUT } from '../shared/config.js'
+import { SIGNALING_PORT, PEER_FANOUT, LONG_RANGE_PEER_COUNT } from '../shared/config.js'
 import type { SignalingMessage } from '../shared/types.js'
 
 const app = new Hono()
@@ -47,7 +47,7 @@ app.get('/ws', upgradeWebSocket((_c) => {
           for (const [id] of peers) {
             if (id !== nodeId) existingIds.push(id)
           }
-          const selected = existingIds.slice(-PEER_FANOUT)
+          const selected = existingIds.slice(-(PEER_FANOUT + LONG_RANGE_PEER_COUNT))
 
           // Reply with JOIN_ACK: polite=true if there are existing peers (joiner is responder)
           const ack: SignalingMessage = {
