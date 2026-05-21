@@ -6,11 +6,16 @@ import type { DBSchema } from 'idb'
 
 export interface MetricsEvent {
   schema_version: 1
-  type: 'sw-cache' | 'peer-fetch' | 'server-fallback'
+  type: 'sw-cache' | 'peer-fetch' | 'server-fallback' | 'gossip-propagation'
   key: string              // cache path key (e.g., '/api/products/42')
   latency_ms: number       // self.performance.now() delta, rounded to 2dp
   source_node_id: string   // UUID, 'local' alias for Phase 1
   timestamp: number        // Date.now() epoch ms
+  // Phase 3 additions — gossip propagation metrics
+  msgId?: string           // gossip message ID for deduplication tracking
+  t_invalidate?: number    // epoch ms when invalidation was first created
+  t_received?: number      // epoch ms when this node received the gossip message
+  hop_count?: number       // number of hops from origin (GOSSIP_TTL - msg.ttl)
 }
 
 export interface CacheMeta {
@@ -45,7 +50,14 @@ export interface SignalingMessage {
   polite?: boolean
 }
 
-export type SwMessageType = 'GET_NODE_ID' | 'NODE_ID' | 'P2P_FETCH' | 'P2P_FETCH_RESPONSE' | 'FLUSH_BUFFER'
+export type SwMessageType =
+  | 'GET_NODE_ID'
+  | 'NODE_ID'
+  | 'P2P_FETCH'
+  | 'P2P_FETCH_RESPONSE'
+  | 'FLUSH_BUFFER'
+  | 'GOSSIP_INVALIDATE'
+  | 'IMPORT_SESSION_KEY'
 
 export interface SwMessage {
   type: SwMessageType
@@ -54,6 +66,24 @@ export interface SwMessage {
   payload?: string
   seq?: number
   found?: boolean
+  // Phase 3 additions — gossip + encryption
+  msgId?: string
+  ttl?: number
+  originNodeId?: string
+  t_invalidate?: number
+  keyId?: string
+  keyBytes?: ArrayBuffer | Uint8Array
+}
+
+// Phase 3 — Gossip invalidation message propagated over RTCDataChannel (gossip channel)
+export interface GossipMessage {
+  type: 'GOSSIP_INVALIDATE'
+  msgId: string            // UUID — used for seen-set deduplication (T-03-01)
+  key: string              // cache key being invalidated (path, e.g. '/api/products/42')
+  seq: number              // server-issued monotonic sequence number for the key
+  ttl: number              // remaining hops; decremented per forward; drop when 0
+  originNodeId: string     // UUID of the node that originated the invalidation
+  t_invalidate: number     // epoch ms when the invalidation was created at origin
 }
 
 export interface PeerFetchRequest {

@@ -25,3 +25,10 @@ export const DC_CACHE_FETCH_ID = 1
 export const ICE_SERVERS: { urls: string | string[]; username?: string; credential?: string }[] = [
   { urls: 'stun:stun.l.google.com:19302' },
 ]
+
+// Phase 3 additions — Gossip Protocol + Encryption
+// GOSSIP_TTL: max hops = ceil(log2(10)) + 1 = 5 (covers a 10-node network with 1 spare hop)
+export const GOSSIP_TTL = Math.ceil(Math.log2(10)) + 1  // evaluates to 5
+export const GOSSIP_SEEN_SET_MAX = 1000                  // LruSet eviction ceiling
+export const LONG_RANGE_PEER_COUNT = 2                   // long-range peer count for gossip topology
+export const ENCRYPTION_KEY_ID = 'default'               // session-derived key identifier
