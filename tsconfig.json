@@ -11,6 +11,6 @@
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true
   },
-  "include": ["src/dashboard/**/*.ts", "src/shared/**/*.ts"],
+  "include": ["src/dashboard/**/*.ts", "src/p2p/**/*.ts", "src/shared/**/*.ts"],
   "exclude": ["src/sw", "node_modules", "dist"]
 }

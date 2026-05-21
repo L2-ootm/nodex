@@ -8,6 +8,7 @@
 
 import type { MetricsEvent } from '../shared/types.js'
 import { METRICS_CHANNEL_NAME } from '../shared/config.js'
+import { peerManager } from '../p2p/p2p-manager.js'
 
 // ---------------------------------------------------------------------------
 // Pure exported functions (no DOM, no BroadcastChannel — testable under vitest)
@@ -99,13 +100,16 @@ if (typeof document !== 'undefined') {
     }, 5000)
 
     navigator.serviceWorker.ready
-      .then(() => {
+      .then(async () => {
         clearTimeout(swTimeoutId)
         if (liveDot) {
           liveDot.classList.add('live-dot--active')
         }
         if (swStatusChip) {
           swStatusChip.textContent = 'SW: active'
+        }
+        if (navigator.serviceWorker.controller) {
+          await peerManager.init()
         }
       })
       .catch(() => {
