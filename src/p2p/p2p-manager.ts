@@ -5,11 +5,14 @@
 import {
   SIGNALING_URL,
   PEER_FANOUT,
+  LONG_RANGE_PEER_COUNT,
   ICE_SERVERS,
   DC_GOSSIP_ID,
   DC_CACHE_FETCH_ID,
+  METRICS_CHANNEL_NAME,
 } from '../shared/config.js'
 import type { SignalingMessage, PeerFetchRequest, PeerFetchResponse } from '../shared/types.js'
+import { GossipEngine, _resetForTest as _resetGossipForTest } from '../gossip/gossip-engine.js'
 
 // Per-connection state model (includes Perfect Negotiation flags)
 interface PeerConnection {
@@ -18,6 +21,7 @@ interface PeerConnection {
   gossip: RTCDataChannel
   cacheFetch: RTCDataChannel
   polite: boolean
+  role: 'local' | 'long-range'
   state: 'connecting' | 'connected' | 'failed' | 'closed'
   makingOffer: boolean
   ignoreOffer: boolean
@@ -28,6 +32,27 @@ export const connections = new Map<string, PeerConnection>()
 export const pendingRequests = new Map<string, (response: PeerFetchResponse) => void>()
 let signalingWs: WebSocket | null = null
 let nodeId: string | null = null
+
+// GossipEngine wired to connections Map with SW postMessage bridge (GOSP-02)
+const gossipEngine = new GossipEngine(
+  connections as Map<string, { gossip: RTCDataChannel; state: string }>,
+  (event) => {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const ch = new BroadcastChannel(METRICS_CHANNEL_NAME)
+      ch.postMessage(event)
+      ch.close()
+    }
+  },
+  (msg: { key: string; seq: number }) => {
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.controller?.postMessage({
+        type: 'GOSSIP_INVALIDATE',
+        key: msg.key,
+        seq: msg.seq,
+      })
+    }
+  }
+)
 
 // ---------------------------------------------------------------------------
 // createChannels — pre-create both DataChannels before any SDP negotiation
@@ -98,7 +123,7 @@ async function getNodeIdFromSW(): Promise<string> {
 // connectToPeer — create RTCPeerConnection + channels, attach all event handlers
 // ---------------------------------------------------------------------------
 
-function connectToPeer(peerId: string, polite: boolean): void {
+function connectToPeer(peerId: string, polite: boolean, role: 'local' | 'long-range' = 'local'): void {
   if (connections.has(peerId)) return
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
@@ -110,11 +135,13 @@ function connectToPeer(peerId: string, polite: boolean): void {
     gossip,
     cacheFetch,
     polite,
+    role,
     state: 'connecting',
     makingOffer: false,
     ignoreOffer: false,
   }
   connections.set(peerId, conn)
+  gossipEngine.attachChannel(peerId, gossip)
 
   // Perfect Negotiation: offer creation
   pc.onnegotiationneeded = async () => {
@@ -245,10 +272,10 @@ function handleSwMessage(event: MessageEvent): void {
 async function handleSignalingMessage(msg: SignalingMessage): Promise<void> {
   if (msg.type === 'JOIN_ACK') {
     const peers = msg.peers ?? []
-    const count = Math.min(peers.length, PEER_FANOUT)
-    for (let i = 0; i < count; i++) {
-      // The joining node is polite toward existing peers
-      connectToPeer(peers[i], !!msg.polite)
+    // peers[0..PEER_FANOUT-1] = local; peers[PEER_FANOUT..PEER_FANOUT+LONG_RANGE_PEER_COUNT-1] = long-range
+    for (let i = 0; i < peers.length; i++) {
+      const role: 'local' | 'long-range' = i < PEER_FANOUT ? 'local' : 'long-range'
+      connectToPeer(peers[i], !!msg.polite, role)
     }
     return
   }
@@ -317,6 +344,17 @@ async function init(): Promise<void> {
     return
   }
 
+  // Fetch session key and post to SW for AES-GCM decryption (CRPT-02)
+  try {
+    const keyRes = await fetch('/api/session-key')
+    if (keyRes.ok) {
+      const { keyId, keyBytes } = await keyRes.json() as { keyId: string; keyBytes: string }
+      navigator.serviceWorker.controller?.postMessage({ type: 'IMPORT_SESSION_KEY', keyId, keyBytes })
+    }
+  } catch (err) {
+    console.warn('[p2p] session key fetch failed:', err)
+  }
+
   const ws = new WebSocket(SIGNALING_URL)
   signalingWs = ws
 
@@ -350,10 +388,11 @@ async function init(): Promise<void> {
     navigator.serviceWorker.addEventListener('message', handleSwMessage)
   }
 
-  // Expose on window for Playwright test introspection (PEER-02, PEER-03, PEER-05)
+  // Expose on window for Playwright test introspection (PEER-02, PEER-03, PEER-05, GOSP-06)
   if (typeof window !== 'undefined') {
     ;(window as unknown as Record<string, unknown>)['__peerManager'] = peerManager
     ;(window as unknown as Record<string, unknown>)['__peerConnections'] = connections
+    ;(window as unknown as Record<string, unknown>)['__gossipEngine'] = gossipEngine
     ;(window as unknown as Record<string, unknown>)['__peerManagerReady'] = true
   }
 }
@@ -367,6 +406,7 @@ export function _resetForTest(): void {
   pendingRequests.clear()
   signalingWs = null
   nodeId = null
+  _resetGossipForTest()
 }
 
 // ---------------------------------------------------------------------------

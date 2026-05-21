@@ -10,6 +10,6 @@
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true
   },
-  "include": ["**/*.ts", "../shared/**/*.ts"],
+  "include": ["**/*.ts", "../shared/**/*.ts", "../crypto/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

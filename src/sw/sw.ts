@@ -22,14 +22,19 @@ import { getCachedEntry, putCachedEntry, touchAccessedAt } from './cache.js'
 import { emitMetric, flushBuffer, getNodeId } from './metrics.js'
 import {
   CACHE_URL_PREFIX,
+  CACHE_NAME,
   META_STORE,
   P2P_FETCH_TIMEOUT_MS,
 } from '../shared/config.js'
 import type { CacheMeta } from '../shared/types.js'
+import { decrypt as aesDecode } from '../crypto/crypto.js'
 
 declare const self: ServiceWorkerGlobalScope
 
 const SW_VERSION = '1.0.0'
+
+// Session keys imported via IMPORT_SESSION_KEY postMessage (CRPT-02)
+const sessionKeys = new Map<string, CryptoKey>()
 
 // ---------------------------------------------------------------------------
 // Install — skip waiting so the new SW takes control immediately
@@ -100,6 +105,41 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
       getNodeId().then((nodeId) => {
         ;(event.source as Client)?.postMessage({ type: 'NODE_ID', nodeId })
       })
+    )
+  } else if (type === 'GOSSIP_INVALIDATE') {
+    // Evict stale cache entry when gossip invalidation arrives (GOSP-02)
+    const { key, seq } = event.data as { key: string; seq: number }
+    event.waitUntil(
+      (async () => {
+        updateSeq(key, seq)
+        try {
+          const cache = await caches.open(CACHE_NAME)
+          await cache.delete(key)
+        } catch (err) {
+          console.warn('[SW] GOSSIP_INVALIDATE cache.delete error:', err)
+        }
+        try {
+          const db = await getDb()
+          await db.delete(META_STORE, key)
+        } catch {
+          // best-effort IDB delete
+        }
+      })()
+    )
+  } else if (type === 'IMPORT_SESSION_KEY') {
+    // Import AES-GCM session key for peer payload decryption (CRPT-02)
+    const { keyId, keyBytes } = event.data as { keyId: string; keyBytes: string }
+    event.waitUntil(
+      (async () => {
+        try {
+          const raw = Uint8Array.from(atob(keyBytes), (c) => c.charCodeAt(0))
+          const cryptoKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, true, ['decrypt'])
+          sessionKeys.set(keyId, cryptoKey)
+          console.log('[SW] session key imported:', keyId)
+        } catch (err) {
+          console.warn('[SW] IMPORT_SESSION_KEY failed:', err)
+        }
+      })()
     )
   }
 })
@@ -185,12 +225,40 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
         event.data.found &&
         event.data.payload
       ) {
-        resolve(
-          new Response(event.data.payload, {
-            status: 200,
-            headers: { 'X-Nodex-Seq': String(event.data.seq ?? 0) },
+        // Payload is JSON: { ciphertext: base64, iv: base64, keyId: string, seq: number }
+        // CRPT-04: DTLS provides transport encryption; AES-GCM provides payload confidentiality
+        // at rest and in peer-to-peer transit (DataChannel content never plaintext in flight)
+        let parsed: { ciphertext: string; iv: string; keyId: string; seq: number }
+        try {
+          parsed = JSON.parse(event.data.payload as string) as typeof parsed
+        } catch {
+          resolve(null)
+          return
+        }
+        const cryptoKey = sessionKeys.get(parsed.keyId)
+        if (!cryptoKey) {
+          resolve(null)
+          return
+        }
+        const ctBytes = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0))
+        const ivBytes = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0))
+        // aesDecode throws DOMException(OperationError) on tamper/wrong key → server fallback (CRPT-03)
+        aesDecode(ctBytes, ivBytes, cryptoKey)
+          .then((plaintext: Uint8Array) => {
+            resolve(
+              new Response(new TextDecoder().decode(plaintext), {
+                status: 200,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Nodex-Seq': String(parsed.seq),
+                },
+              })
+            )
           })
-        )
+          .catch((err: unknown) => {
+            console.warn('[SW] tryPeerFetch decrypt failed:', err)
+            resolve(null)
+          })
       } else {
         resolve(null)
       }

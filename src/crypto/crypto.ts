@@ -19,7 +19,7 @@
 export async function importKey(rawBytes: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'raw',
-    rawBytes,
+    rawBytes as unknown as Uint8Array<ArrayBuffer>,
     { name: 'AES-GCM' },
     true,               // extractable=true (PoC only — T-03-05 accepted risk)
     ['encrypt', 'decrypt'],
@@ -42,9 +42,9 @@ export async function encrypt(
 ): Promise<{ ciphertext: Uint8Array; iv: Uint8Array }> {
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const result = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
+    { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
     key,
-    plaintext,
+    plaintext as unknown as Uint8Array<ArrayBuffer>,
   )
   return { ciphertext: new Uint8Array(result), iv }
 }
@@ -70,9 +70,9 @@ export async function decrypt(
 ): Promise<Uint8Array> {
   try {
     const result = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
+      { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
       key,
-      ciphertext,
+      ciphertext as unknown as Uint8Array<ArrayBuffer>,
     )
     return new Uint8Array(result)
   } catch (err) {
