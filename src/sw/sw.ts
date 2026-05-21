@@ -23,6 +23,7 @@ import { emitMetric, flushBuffer, getNodeId } from './metrics.js'
 import {
   CACHE_URL_PREFIX,
   META_STORE,
+  P2P_FETCH_TIMEOUT_MS,
 } from '../shared/config.js'
 import type { CacheMeta } from '../shared/types.js'
 
@@ -90,10 +91,17 @@ self.addEventListener('activate', (event: ExtendableEvent) => {
 // ---------------------------------------------------------------------------
 
 self.addEventListener('message', (event: ExtendableMessageEvent) => {
-  // T-03-02: only process recognized message types
-  if (event.data?.type !== 'FLUSH_BUFFER') return
-
-  event.waitUntil(flushBuffer())
+  const type = event.data?.type
+  // T-03-02: only process recognized message types; unknown types silently discarded
+  if (type === 'FLUSH_BUFFER') {
+    event.waitUntil(flushBuffer())
+  } else if (type === 'GET_NODE_ID') {
+    event.waitUntil(
+      getNodeId().then((nodeId) => {
+        ;(event.source as Client)?.postMessage({ type: 'NODE_ID', nodeId })
+      })
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -146,8 +154,51 @@ async function handleRequest(request: Request): Promise<Response> {
     console.log('[SW] cache-miss, fetching from server:', key)
   }
 
+  // --- P2P peer fetch (200ms race timeout, PEER-06) ---
+  const peerResponse = await tryPeerFetch(key)
+  if (peerResponse) {
+    const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
+    await emitMetric({ type: 'peer-fetch', key, latency_ms })
+    return peerResponse
+  }
+
   // --- Server fallback ---
   return fetchAndCache(request, key, start)
+}
+
+// ---------------------------------------------------------------------------
+// tryPeerFetch — SW→page postMessage bridge; races against P2P_FETCH_TIMEOUT_MS
+// ---------------------------------------------------------------------------
+
+async function tryPeerFetch(key: string): Promise<Response | null> {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false })
+  if (clients.length === 0) return null
+
+  return new Promise<Response | null>((resolve) => {
+    const channel = new MessageChannel()
+    const timeout = setTimeout(() => resolve(null), P2P_FETCH_TIMEOUT_MS)
+
+    channel.port1.onmessage = (event: MessageEvent) => {
+      clearTimeout(timeout)
+      if (
+        event.data?.type === 'P2P_FETCH_RESPONSE' &&
+        event.data.found &&
+        event.data.payload
+      ) {
+        resolve(
+          new Response(event.data.payload, {
+            status: 200,
+            headers: { 'X-Nodex-Seq': String(event.data.seq ?? 0) },
+          })
+        )
+      } else {
+        resolve(null)
+      }
+    }
+
+    // Transfer port1 to the page client so it can reply on it
+    clients[0].postMessage({ type: 'P2P_FETCH', key }, [channel.port1])
+  })
 }
 
 // ---------------------------------------------------------------------------
