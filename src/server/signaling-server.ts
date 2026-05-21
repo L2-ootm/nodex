@@ -2,6 +2,8 @@
 // Hono + @hono/node-ws signaling server for Phase 2 WebRTC peer discovery
 // Port 3002 (separate from mock API on 3001)
 // Relays OFFER/ANSWER/ICE_CANDIDATE between peers; never relays data after handshake
+//
+// POC ONLY — production rewrite target: Go or Rust (see STATE.md stack constraints)
 
 import { Hono } from 'hono'
 import { serve } from '@hono/node-server'
