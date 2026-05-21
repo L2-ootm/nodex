@@ -10,6 +10,8 @@ export default defineConfig({
       'src/sw/freshness.test.ts',
       'src/sw/cache.test.ts',
       'src/dashboard/dashboard.test.ts',
+      'src/gossip/**/*.test.ts',
+      'src/crypto/**/*.test.ts',
     ],
     exclude: [
       'tests/**',
