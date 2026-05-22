@@ -118,6 +118,12 @@ if (typeof document !== 'undefined') {
     ;(window as unknown as Record<string, unknown>)['__latencyAccumulator'] = accumulator
   }
 
+  // Volatility score cache — exposed on window for Playwright VOL tests (VOL-02, VOL-04, VOL-05)
+  const volatilityScores = new Map<string, { score: number; tier: string }>()
+  if (typeof window !== 'undefined') {
+    ;(window as unknown as Record<string, unknown>)['__volatilityScores'] = volatilityScores
+  }
+
   // ---------------------------------------------------------------------------
   // SW Registration + Status
   // ---------------------------------------------------------------------------
@@ -183,8 +189,19 @@ if (typeof document !== 'undefined') {
   // ---------------------------------------------------------------------------
 
   const channel = new BroadcastChannel(METRICS_CHANNEL_NAME)
-  channel.onmessage = (event: MessageEvent<MetricsEvent>) => {
-    handleMetricsEvent(event.data)
+  channel.onmessage = (event: MessageEvent<unknown>) => {
+    // Type guard: volatility-update events are not MetricsEvents — handle separately
+    const data = event.data as Record<string, unknown>
+    if (data?.type === 'volatility-update') {
+      const key = data['key'] as string
+      const score = data['score'] as number
+      const tier = data['tier'] as string
+      if (typeof key === 'string' && typeof score === 'number' && typeof tier === 'string') {
+        updateVolatilityDisplay(key, score, tier)
+      }
+      return
+    }
+    handleMetricsEvent(event.data as MetricsEvent)
   }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -211,6 +228,12 @@ if (typeof document !== 'undefined') {
   const latencyStatsTable = document.getElementById('latency-stats-table') as HTMLTableElement | null
   const latencyTbody = document.getElementById('latency-tbody') as HTMLTableSectionElement | null
   const latencyEmptyState = document.getElementById('latency-empty-state') as HTMLDivElement | null
+
+  // Volatility tier panel elements (VOL-04)
+  const volatilityPanel = document.getElementById('volatility-panel') as HTMLElement | null
+  const volatilityTbody = document.getElementById('volatility-tbody') as HTMLTableSectionElement | null
+  const volatilityEmptyState = document.getElementById('volatility-empty-state') as HTMLDivElement | null
+  const volatilityTable = document.getElementById('volatility-table') as HTMLTableElement | null
 
   // ---------------------------------------------------------------------------
   // renderGossipRow — prepend a gossip-propagation event to gossip-tbody (max 10 rows)
@@ -325,6 +348,55 @@ if (typeof document !== 'undefined') {
       if (latencyStatsTable) latencyStatsTable.hidden = false
       if (latencyEmptyState) latencyEmptyState.hidden = true
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // updateVolatilityDisplay — upsert a row in the volatility-panel table (VOL-04)
+  // ---------------------------------------------------------------------------
+
+  function updateVolatilityDisplay(key: string, score: number, tier: string): void {
+    // Update in-memory map (exposed as window.__volatilityScores for Playwright)
+    volatilityScores.set(key, { score, tier })
+
+    if (!volatilityTbody) return
+
+    // Find existing row for this key, or create a new one
+    let row = volatilityTbody.querySelector(`tr[data-vol-key="${CSS.escape(key)}"]`) as HTMLTableRowElement | null
+
+    if (!row) {
+      row = document.createElement('tr')
+      row.setAttribute('data-vol-key', key)
+
+      const tdKey = document.createElement('td')
+      tdKey.className = 'mono'
+      tdKey.textContent = key  // textContent (T-03-01: no innerHTML)
+
+      const tdTier = document.createElement('td')
+      tdTier.className = `vol-tier vol-tier--${tier}`
+
+      const tdScore = document.createElement('td')
+      tdScore.className = 'col-right mono'
+
+      row.appendChild(tdKey)
+      row.appendChild(tdTier)
+      row.appendChild(tdScore)
+      volatilityTbody.appendChild(row)
+    }
+
+    // Update tier and score cells (textContent only — T-03-01)
+    const cells = row.querySelectorAll('td')
+    if (cells[1]) {
+      cells[1].textContent = tier
+      cells[1].className = `vol-tier vol-tier--${tier}`
+    }
+    if (cells[2]) {
+      cells[2].textContent = score.toFixed(3)
+    }
+
+    // Show table, hide empty state
+    if (volatilityTable) volatilityTable.hidden = false
+    if (volatilityEmptyState) volatilityEmptyState.hidden = true
+    if (volatilityPanel) volatilityPanel.hidden = false
   }
 
   // ---------------------------------------------------------------------------

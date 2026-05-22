@@ -119,6 +119,31 @@
       </div>
     </section>
 
+    <!-- Volatility Tiers Panel (Phase 4, VOL-04) -->
+    <section class="section-panel" id="volatility-panel" hidden>
+      <div class="section-panel__header">
+        <h2>Volatility Tiers</h2>
+      </div>
+
+      <div class="empty-state" id="volatility-empty-state">
+        <p class="empty-state__heading">No volatility data yet</p>
+        <p class="empty-state__body">Trigger gossip invalidations to see per-key volatility scores.</p>
+      </div>
+
+      <table class="event-table" id="volatility-table" aria-label="Per-key volatility tiers" hidden>
+        <thead>
+          <tr>
+            <th scope="col">Key</th>
+            <th scope="col">Tier</th>
+            <th scope="col" class="col-right">Score</th>
+          </tr>
+        </thead>
+        <tbody id="volatility-tbody">
+          <!-- Rows upserted by dashboard.ts on volatility-update events -->
+        </tbody>
+      </table>
+    </section>
+
   </main>
 
   <script type="module" src="./dashboard.ts"></script>

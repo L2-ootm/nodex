@@ -32,7 +32,7 @@ import {
 } from '../shared/config.js'
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { decrypt as aesDecode } from '../crypto/crypto.js'
-import { computeScore } from '../volatility/volatility.js'
+import { computeScore, classifyTier } from '../volatility/volatility.js'
 
 declare const self: ServiceWorkerGlobalScope
 
@@ -160,7 +160,17 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
             ? { ...existing, change_count: existing.change_count + 1, last_changed_at: Date.now() }
             : { key, change_count: 1, last_changed_at: Date.now(), access_count: 0 }
           await db.put(VOLATILITY_STORE, entry)
-          scoreCache.set(key, computeScore(entry))
+          const score = computeScore(entry)
+          scoreCache.set(key, score)
+          // Broadcast volatility-update to dashboard for live tier display (VOL-04)
+          try {
+            const tier = classifyTier(score)
+            const ch = new BroadcastChannel('nodex-metrics')
+            ch.postMessage({ type: 'volatility-update', key, score, tier })
+            ch.close()
+          } catch {
+            // best-effort broadcast — dashboard display is non-critical
+          }
         } catch {
           // best-effort IDB write — SW correctness does not depend on it
         }
