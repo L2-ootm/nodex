@@ -13,6 +13,7 @@ import {
   IDB_VERSION,
   META_STORE,
   METRICS_BUFFER_STORE,
+  VOLATILITY_STORE,
 } from '../shared/config.js'
 
 // Module-level promise — initialized lazily on first getDb() call, reused on all subsequent calls
@@ -26,15 +27,18 @@ let _db: Promise<IDBPDatabase<NodexSchema>> | null = null
 export function getDb(): Promise<IDBPDatabase<NodexSchema>> {
   if (!_db) {
     _db = openDB<NodexSchema>(IDB_NAME, IDB_VERSION, {
-      upgrade(db) {
-        // nodex-meta: keyed by path (string), indexed by accessed_at for LRU eviction queries
-        if (!db.objectStoreNames.contains(META_STORE)) {
+      upgrade(db, oldVersion) {
+        // v1 stores: nodex-meta and nodex-metrics-buffer (only created on fresh install or upgrade from 0)
+        if (oldVersion < 1) {
+          // nodex-meta: keyed by path (string), indexed by accessed_at for LRU eviction queries
           const metaStore = db.createObjectStore(META_STORE, { keyPath: 'path' })
           metaStore.createIndex('accessed_at', 'accessed_at')
-        }
-        // nodex-metrics-buffer: auto-increment integer key, stores MetricsEvent entries (FIFO)
-        if (!db.objectStoreNames.contains(METRICS_BUFFER_STORE)) {
+          // nodex-metrics-buffer: auto-increment integer key, stores MetricsEvent entries (FIFO)
           db.createObjectStore(METRICS_BUFFER_STORE, { autoIncrement: true })
+        }
+        // v2 stores: nodex-volatility — per-key ledger for volatility heuristic classifier (Phase 4)
+        if (oldVersion < 2) {
+          db.createObjectStore(VOLATILITY_STORE, { keyPath: 'key' })
         }
       },
     })
