@@ -29,7 +29,7 @@ interface PeerConnection {
 
 // Module-level state — exported for test introspection and _resetForTest
 export const connections = new Map<string, PeerConnection>()
-export const pendingRequests = new Map<string, (response: PeerFetchResponse) => void>()
+export const pendingRequests = new Map<string, { resolver: (response: PeerFetchResponse) => void; peerId: string }>()
 let signalingWs: WebSocket | null = null
 let nodeId: string | null = null
 
@@ -187,10 +187,12 @@ function connectToPeer(peerId: string, polite: boolean, role: 'local' | 'long-ra
     } else if (state === 'failed') {
       conn.state = 'failed'
       console.log('[P2P] connection failed, triggering ICE restart')
-      // Reject all pending requests for this peer gracefully
-      for (const [reqId, resolver] of pendingRequests) {
-        resolver({ type: 'CACHE_FETCH_RESPONSE', reqId, found: false })
-        pendingRequests.delete(reqId)
+      // Reject only pending requests that were sent to this peer (WR-04)
+      for (const [reqId, { resolver, peerId: rPeerId }] of pendingRequests) {
+        if (rPeerId === peerId) {
+          resolver({ type: 'CACHE_FETCH_RESPONSE', reqId, found: false })
+          pendingRequests.delete(reqId)
+        }
       }
       pc.restartIce()
     } else if (state === 'closed') {
@@ -210,9 +212,9 @@ function connectToPeer(peerId: string, polite: boolean, role: 'local' | 'long-ra
     if ((data as PeerFetchResponse).type === 'CACHE_FETCH_RESPONSE') {
       // Existing path — dispatch to pendingRequests resolver
       const resp = data as PeerFetchResponse
-      const resolver = pendingRequests.get(resp.reqId)
-      if (resolver) {
-        resolver(resp)
+      const entry = pendingRequests.get(resp.reqId)
+      if (entry) {
+        entry.resolver(resp)
         pendingRequests.delete(resp.reqId)
       }
     } else if ((data as PeerFetchRequest).type === 'CACHE_FETCH_REQUEST') {
@@ -273,13 +275,16 @@ function sendCacheFetchRequest(
 ): void {
   const reqId = crypto.randomUUID()
 
-  pendingRequests.set(reqId, (response: PeerFetchResponse) => {
-    replyPort.postMessage({
-      type: 'P2P_FETCH_RESPONSE',
-      found: response.found,
-      payload: response.payload,
-      seq: response.seq,
-    })
+  pendingRequests.set(reqId, {
+    peerId: conn.peerId,
+    resolver: (response: PeerFetchResponse) => {
+      replyPort.postMessage({
+        type: 'P2P_FETCH_RESPONSE',
+        found: response.found,
+        payload: response.payload,
+        seq: response.seq,
+      })
+    },
   })
 
   const request: PeerFetchRequest = { type: 'CACHE_FETCH_REQUEST', reqId, key }
