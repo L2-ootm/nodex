@@ -199,21 +199,67 @@ function connectToPeer(peerId: string, polite: boolean, role: 'local' | 'long-ra
     }
   })
 
-  // Dispatch cache-fetch DataChannel responses by reqId
+  // Dispatch cache-fetch DataChannel messages — handles both response and inbound request paths
   cacheFetch.onmessage = (event: MessageEvent) => {
-    let data: PeerFetchResponse
+    let data: PeerFetchResponse | PeerFetchRequest
     try {
-      data = JSON.parse(event.data as string) as PeerFetchResponse
+      data = JSON.parse(event.data as string) as typeof data
     } catch {
       return
     }
-    if (data.type !== 'CACHE_FETCH_RESPONSE') return
-    const resolver = pendingRequests.get(data.reqId)
-    if (resolver) {
-      resolver(data)
-      pendingRequests.delete(data.reqId)
+    if ((data as PeerFetchResponse).type === 'CACHE_FETCH_RESPONSE') {
+      // Existing path — dispatch to pendingRequests resolver
+      const resp = data as PeerFetchResponse
+      const resolver = pendingRequests.get(resp.reqId)
+      if (resolver) {
+        resolver(resp)
+        pendingRequests.delete(resp.reqId)
+      }
+    } else if ((data as PeerFetchRequest).type === 'CACHE_FETCH_REQUEST') {
+      // Serve path — forward inbound peer request to SW via P2P_FETCH_SERVE (VOL-05 D-10)
+      const req = data as PeerFetchRequest
+      if (!req.reqId || !req.key) return
+      askSwToServe(req.key)
+        .then((result) => {
+          const response: PeerFetchResponse = {
+            type: 'CACHE_FETCH_RESPONSE',
+            reqId: req.reqId,
+            found: result.found,
+            payload: result.payload,
+            seq: result.seq,
+          }
+          try { conn.cacheFetch.send(JSON.stringify(response)) } catch { /* DC may be closing */ }
+        })
+        .catch(() => {
+          try {
+            conn.cacheFetch.send(JSON.stringify({ type: 'CACHE_FETCH_RESPONSE', reqId: req.reqId, found: false }))
+          } catch { /* DC may be closing */ }
+        })
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// askSwToServe — bridge to SW via P2P_FETCH_SERVE + MessageChannel (T-04-05)
+// ---------------------------------------------------------------------------
+
+function askSwToServe(key: string): Promise<{ found: boolean; payload?: string; seq?: number }> {
+  return new Promise((resolve) => {
+    const controller = navigator.serviceWorker.controller
+    if (!controller) {
+      resolve({ found: false })
+      return
+    }
+    const channel = new MessageChannel()
+    // T-04-05: 1000ms timeout — serving node never blocks requesting peer indefinitely
+    const timeout = setTimeout(() => resolve({ found: false }), 1000)
+    channel.port1.onmessage = (event: MessageEvent) => {
+      clearTimeout(timeout)
+      const data = event.data as { found: boolean; payload?: string; seq?: number }
+      resolve({ found: data.found, payload: data.payload, seq: data.seq })
+    }
+    controller.postMessage({ type: 'P2P_FETCH_SERVE', key }, [channel.port2])
+  })
 }
 
 // ---------------------------------------------------------------------------
