@@ -25,9 +25,14 @@ import {
   CACHE_NAME,
   META_STORE,
   P2P_FETCH_TIMEOUT_MS,
+  VOL_COLD_START,
+  VOL_P2P_GATE,
+  VOLATILITY_STORE,
+  ENCRYPTION_KEY_ID,
 } from '../shared/config.js'
-import type { CacheMeta } from '../shared/types.js'
+import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { decrypt as aesDecode } from '../crypto/crypto.js'
+import { computeScore } from '../volatility/volatility.js'
 
 declare const self: ServiceWorkerGlobalScope
 
@@ -35,6 +40,10 @@ const SW_VERSION = '1.0.0'
 
 // Session keys imported via IMPORT_SESSION_KEY postMessage (CRPT-02)
 const sessionKeys = new Map<string, CryptoKey>()
+
+// In-memory volatility score cache — seeded from IDB on activate, refreshed on GOSSIP_INVALIDATE
+// Lookup is O(1) synchronous; no IDB reads in the fetch event hot path (VOL-05)
+const scoreCache = new Map<string, number>()
 
 // ---------------------------------------------------------------------------
 // Install — skip waiting so the new SW takes control immediately
@@ -63,6 +72,19 @@ async function activateSW(): Promise<void> {
   } catch (err) {
     // IDB unavailable — safe to continue; seqMap stays empty (all entries treated as fresh)
     console.warn('[SW] IDB seed failed:', err)
+  }
+
+  // Seed in-memory scoreCache from IDB volatility ledger (best-effort, VOL-05)
+  try {
+    const db = await getDb()
+    const volatilityEntries: VolatilityEntry[] = await db.getAll(VOLATILITY_STORE)
+    for (const entry of volatilityEntries) {
+      scoreCache.set(entry.key, computeScore(entry))
+    }
+    console.log(`[SW] seeded scoreCache with ${volatilityEntries.length} entries`)
+  } catch (err) {
+    // IDB unavailable — scoreCache stays empty; all keys default to VOL_COLD_START at runtime
+    console.warn('[SW] scoreCache seed failed:', err)
   }
 
   // Generate and store the persistent source_node_id UUID (D-16)
@@ -130,6 +152,18 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
         } catch {
           // best-effort IDB delete
         }
+        // Update volatility ledger on invalidation — refreshes scoreCache in-memory (VOL-05)
+        try {
+          const db = await getDb()
+          const existing = await db.get(VOLATILITY_STORE, key)
+          const entry: VolatilityEntry = existing
+            ? { ...existing, change_count: existing.change_count + 1, last_changed_at: Date.now() }
+            : { key, change_count: 1, last_changed_at: Date.now(), access_count: 0 }
+          await db.put(VOLATILITY_STORE, entry)
+          scoreCache.set(key, computeScore(entry))
+        } catch {
+          // best-effort IDB write — SW correctness does not depend on it
+        }
       })()
     )
   } else if (type === 'IMPORT_SESSION_KEY') {
@@ -144,6 +178,40 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           console.log('[SW] session key imported:', keyId)
         } catch (err) {
           console.warn('[SW] IMPORT_SESSION_KEY failed:', err)
+        }
+      })()
+    )
+  } else if (type === 'P2P_FETCH_SERVE') {
+    // Serve cached payload to a requesting peer via score gate (T-04-04, VOL-05 D-10)
+    const { key } = event.data as { key: string }
+    const replyPort = event.ports[0]
+    event.waitUntil(
+      (async () => {
+        // T-04-04: high-volatility keys never leave the SW — respond found: false
+        const score = scoreCache.get(key) ?? VOL_COLD_START
+        if (score >= VOL_P2P_GATE) {
+          replyPort?.postMessage({ found: false })
+          return
+        }
+        try {
+          const cache = await caches.open(CACHE_NAME)
+          const cached = await cache.match(key)
+          if (!cached) {
+            replyPort?.postMessage({ found: false })
+            return
+          }
+          const payload = await cached.text()
+          const seq = parseInt(cached.headers.get('X-Nodex-Seq') ?? '1', 10)
+          const iv = cached.headers.get('X-Nodex-Iv') ?? ''
+          const keyId = cached.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
+          // Re-serve the encrypted payload as-is (server stores ciphertext; SW never decrypts for peer serve)
+          replyPort?.postMessage({
+            found: true,
+            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq }),
+          })
+        } catch (err) {
+          console.warn('[SW] P2P_FETCH_SERVE error:', err)
+          replyPort?.postMessage({ found: false })
         }
       })()
     )
@@ -198,6 +266,13 @@ async function handleRequest(request: Request): Promise<Response> {
     console.log('[SW] cache-stale, fetching from server:', key, 'cachedSeq=', cachedSeq)
   } else {
     console.log('[SW] cache-miss, fetching from server:', key)
+  }
+
+  // --- VOL-05 routing gate: skip P2P for high-volatility keys (synchronous O(1) lookup) ---
+  const score = scoreCache.get(key) ?? VOL_COLD_START
+  if (score >= VOL_P2P_GATE) {
+    console.log('[SW] VOL-05 gate: skipping P2P, score=', score, 'key=', key)
+    return fetchAndCache(request, key, start)
   }
 
   // --- P2P peer fetch (200ms race timeout, PEER-06) ---
