@@ -32,7 +32,7 @@ export function calculateHitRate(swCacheCount: number, serverFallbackCount: numb
 export function formatLatency(latency_ms: number): string {
   const formatted = Number.isInteger(latency_ms)
     ? String(latency_ms)
-    : String(latency_ms)
+    : latency_ms.toFixed(2)
   return `${formatted}ms`
 }
 
@@ -360,8 +360,11 @@ if (typeof document !== 'undefined') {
 
     if (!volatilityTbody) return
 
-    // Find existing row for this key, or create a new one
-    let row = volatilityTbody.querySelector(`tr[data-vol-key="${CSS.escape(key)}"]`) as HTMLTableRowElement | null
+    // Find existing row for this key, or create a new one.
+    // Use raw attribute value matching — CSS.escape() transforms / and : which are valid
+    // in data-attribute values but would break the selector match (WR-01).
+    const escapedKey = key.replace(/"/g, '\\"')
+    let row = volatilityTbody.querySelector(`tr[data-vol-key="${escapedKey}"]`) as HTMLTableRowElement | null
 
     if (!row) {
       row = document.createElement('tr')
