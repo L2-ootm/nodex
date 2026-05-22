@@ -25,6 +25,13 @@ export interface CacheMeta {
   byte_size: number        // estimated response body bytes
 }
 
+export interface VolatilityEntry {
+  key: string
+  change_count: number
+  last_changed_at: number  // epoch ms — timestamp of most recent invalidation event
+  access_count: number
+}
+
 export interface NodexSchema extends DBSchema {
   'nodex-meta': {
     key: string
@@ -34,6 +41,10 @@ export interface NodexSchema extends DBSchema {
   'nodex-metrics-buffer': {
     key: number
     value: MetricsEvent
+  }
+  'nodex-volatility': {
+    key: string
+    value: VolatilityEntry
   }
 }
 
@@ -55,6 +66,7 @@ export type SwMessageType =
   | 'NODE_ID'
   | 'P2P_FETCH'
   | 'P2P_FETCH_RESPONSE'
+  | 'P2P_FETCH_SERVE'
   | 'FLUSH_BUFFER'
   | 'GOSSIP_INVALIDATE'
   | 'IMPORT_SESSION_KEY'
