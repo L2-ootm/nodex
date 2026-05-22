@@ -34,7 +34,7 @@ describe('shared/config', () => {
     expect(METRICS_CHANNEL_NAME).toBe('nodex-metrics')
   })
 
-  it('IDB_VERSION is 1', () => {
-    expect(IDB_VERSION).toBe(1)
+  it('IDB_VERSION is 2', () => {
+    expect(IDB_VERSION).toBe(2)
   })
 })

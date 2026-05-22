@@ -12,6 +12,7 @@ export default defineConfig({
       'src/dashboard/dashboard.test.ts',
       'src/gossip/**/*.test.ts',
       'src/crypto/**/*.test.ts',
+      'src/volatility/**/*.test.ts',
     ],
     exclude: [
       'tests/**',
