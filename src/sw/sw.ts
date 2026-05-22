@@ -101,9 +101,15 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
   if (type === 'FLUSH_BUFFER') {
     event.waitUntil(flushBuffer())
   } else if (type === 'GET_NODE_ID') {
+    // Reply on the transferred port (event.ports[0]) so page's port1.onmessage receives it
+    const replyPort = event.ports[0]
     event.waitUntil(
       getNodeId().then((nodeId) => {
-        ;(event.source as Client)?.postMessage({ type: 'NODE_ID', nodeId })
+        if (replyPort) {
+          replyPort.postMessage({ type: 'NODE_ID', nodeId })
+        } else {
+          ;(event.source as Client)?.postMessage({ type: 'NODE_ID', nodeId })
+        }
       })
     )
   } else if (type === 'GOSSIP_INVALIDATE') {
@@ -218,7 +224,8 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
     const channel = new MessageChannel()
     const timeout = setTimeout(() => resolve(null), P2P_FETCH_TIMEOUT_MS)
 
-    channel.port1.onmessage = (event: MessageEvent) => {
+    // port1 is transferred to page; SW listens on port2 to receive the reply
+    channel.port2.onmessage = (event: MessageEvent) => {
       clearTimeout(timeout)
       if (
         event.data?.type === 'P2P_FETCH_RESPONSE' &&
@@ -264,7 +271,7 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
       }
     }
 
-    // Transfer port1 to the page client so it can reply on it
+    // Transfer port1 to the page; page replies on it, SW receives via port2.onmessage
     clients[0].postMessage({ type: 'P2P_FETCH', key }, [channel.port1])
   })
 }

@@ -1,6 +1,7 @@
 // src/dashboard/dashboard.ts — Full metrics dashboard
 // BroadcastChannel listener, hit rate counter, event log table,
 // fetch/invalidate form handlers, SW status detection, FLUSH_BUFFER trigger.
+// Phase 3 additions: LatencyAccumulator, Gossip Propagation panel, Latency Percentiles panel.
 //
 // STRIDE mitigations:
 //   T-03-01: all event data rendered via textContent (never innerHTML)
@@ -29,7 +30,6 @@ export function calculateHitRate(swCacheCount: number, serverFallbackCount: numb
  * Strips trailing zeros from decimal representation.
  */
 export function formatLatency(latency_ms: number): string {
-  // Use toPrecision-style: show up to 1 decimal if needed, strip trailing .0
   const formatted = Number.isInteger(latency_ms)
     ? String(latency_ms)
     : String(latency_ms)
@@ -65,6 +65,44 @@ export function prepareRowData(event: MetricsEvent): {
 }
 
 // ---------------------------------------------------------------------------
+// LatencyAccumulator — pure class for p50/p95/p99 latency stats (METR-04)
+// Exported for vitest unit testing and Playwright window.__latencyAccumulator
+// ---------------------------------------------------------------------------
+
+export class LatencyAccumulator {
+  private samples = new Map<string, number[]>()
+
+  record(type: string, latency_ms: number): void {
+    const arr = this.samples.get(type)
+    if (arr) {
+      arr.push(latency_ms)
+    } else {
+      this.samples.set(type, [latency_ms])
+    }
+  }
+
+  getStats(type: string): { p50: number; p95: number; p99: number; count: number } {
+    const arr = this.samples.get(type)
+    if (!arr || arr.length === 0) {
+      return { p50: 0, p95: 0, p99: 0, count: 0 }
+    }
+    const sorted = [...arr].sort((a, b) => a - b)
+    return {
+      p50: this.percentile(sorted, 50),
+      p95: this.percentile(sorted, 95),
+      p99: this.percentile(sorted, 99),
+      count: sorted.length,
+    }
+  }
+
+  private percentile(sorted: number[], p: number): number {
+    if (sorted.length === 0) return 0
+    const idx = Math.ceil((p / 100) * sorted.length) - 1
+    return Math.round(sorted[Math.max(0, idx)])
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DOM-dependent logic — only runs in browser context (DOMContentLoaded)
 // ---------------------------------------------------------------------------
 
@@ -73,6 +111,12 @@ if (typeof document !== 'undefined') {
   // Counters
   let swCacheCount = 0
   let serverFallbackCount = 0
+
+  // LatencyAccumulator instance — exposed on window for Playwright METR-04 test
+  const accumulator = new LatencyAccumulator()
+  if (typeof window !== 'undefined') {
+    ;(window as unknown as Record<string, unknown>)['__latencyAccumulator'] = accumulator
+  }
 
   // ---------------------------------------------------------------------------
   // SW Registration + Status
@@ -83,12 +127,10 @@ if (typeof document !== 'undefined') {
   const swBanner = document.getElementById('sw-banner') as HTMLDivElement | null
 
   if ('serviceWorker' in navigator) {
-    // Register SW
     navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch((err) => {
       console.error('[dashboard] SW registration failed:', err)
     })
 
-    // Set a timeout: if ready hasn't resolved in 5s, show not-detected state
     const swTimeoutId = setTimeout(() => {
       if (liveDot) {
         liveDot.classList.remove('live-dot--active')
@@ -108,9 +150,23 @@ if (typeof document !== 'undefined') {
         if (swStatusChip) {
           swStatusChip.textContent = 'SW: active'
         }
-        if (navigator.serviceWorker.controller) {
-          await peerManager.init()
+        // If controller raced ahead of ready, wait for controllerchange before init
+        if (!navigator.serviceWorker.controller) {
+          await new Promise<void>((resolve) => {
+            navigator.serviceWorker.addEventListener('controllerchange', () => resolve(), { once: true })
+          })
         }
+        await peerManager.init()
+        // Fetch session key and post to SW for AES-GCM decryption (CRPT-02, idempotent)
+        fetch('/api/session-key')
+          .then((r) => r.json())
+          .then((data) => {
+            const { keyId, keyBytes } = data as { keyId: string; keyBytes: string }
+            if (navigator.serviceWorker.controller) {
+              navigator.serviceWorker.controller.postMessage({ type: 'IMPORT_SESSION_KEY', keyId, keyBytes })
+            }
+          })
+          .catch((err) => console.warn('[dashboard] session key fetch failed:', err))
       })
       .catch(() => {
         clearTimeout(swTimeoutId)
@@ -131,7 +187,6 @@ if (typeof document !== 'undefined') {
     handleMetricsEvent(event.data)
   }
 
-  // Send FLUSH_BUFFER on page open so the SW re-emits buffered events (D-15)
   document.addEventListener('DOMContentLoaded', () => {
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.controller.postMessage({ type: 'FLUSH_BUFFER' })
@@ -139,7 +194,7 @@ if (typeof document !== 'undefined') {
   })
 
   // ---------------------------------------------------------------------------
-  // Metrics event handler
+  // Metrics event handler DOM elements
   // ---------------------------------------------------------------------------
 
   const hitRateDisplay = document.getElementById('hit-rate-display') as HTMLSpanElement | null
@@ -147,12 +202,153 @@ if (typeof document !== 'undefined') {
   const eventTbody = document.getElementById('event-tbody') as HTMLTableSectionElement | null
   const emptyState = document.getElementById('empty-state') as HTMLDivElement | null
 
+  // Gossip propagation panel elements (METR-03)
+  const gossipTable = document.getElementById('gossip-table') as HTMLTableElement | null
+  const gossipTbody = document.getElementById('gossip-tbody') as HTMLTableSectionElement | null
+  const gossipEmptyState = document.getElementById('gossip-empty-state') as HTMLDivElement | null
+
+  // Latency percentile panel elements (METR-04)
+  const latencyStatsTable = document.getElementById('latency-stats-table') as HTMLTableElement | null
+  const latencyTbody = document.getElementById('latency-tbody') as HTMLTableSectionElement | null
+  const latencyEmptyState = document.getElementById('latency-empty-state') as HTMLDivElement | null
+
+  // ---------------------------------------------------------------------------
+  // renderGossipRow — prepend a gossip-propagation event to gossip-tbody (max 10 rows)
+  // ---------------------------------------------------------------------------
+
+  function renderGossipRow(event: MetricsEvent): void {
+    if (!gossipTbody) return
+
+    const propagation_ms = (event.t_received ?? Date.now()) - (event.t_invalidate ?? Date.now())
+    const hop_count = event.hop_count ?? 0
+    const msgIdShort = (event.msgId ?? '').slice(0, 8).toUpperCase()
+
+    const now = new Date(event.t_received ?? Date.now())
+    const hh = String(now.getHours()).padStart(2, '0')
+    const mm = String(now.getMinutes()).padStart(2, '0')
+    const ss = String(now.getSeconds()).padStart(2, '0')
+    const ms = String(now.getMilliseconds()).padStart(3, '0')
+    const receivedAt = `${hh}:${mm}:${ss}.${ms}`
+
+    const tr = document.createElement('tr')
+
+    const tdMsg = document.createElement('td')
+    tdMsg.className = 'mono'
+    tdMsg.textContent = msgIdShort  // textContent (T-03-01)
+
+    const tdKey = document.createElement('td')
+    tdKey.className = 'mono'
+    tdKey.textContent = event.key  // textContent (T-03-01)
+
+    const tdProp = document.createElement('td')
+    tdProp.className = 'col-right'
+    const propClass = propagation_ms < 100 ? 'propagation--normal' : propagation_ms < 250 ? 'propagation--warn' : 'propagation--slow'
+    tdProp.classList.add(propClass)
+    tdProp.textContent = `${Math.round(propagation_ms)}ms`
+
+    const tdHop = document.createElement('td')
+    tdHop.className = 'col-right'
+    tdHop.textContent = String(hop_count)
+
+    const tdTs = document.createElement('td')
+    tdTs.className = 'col-right mono'
+    tdTs.textContent = receivedAt
+
+    tr.appendChild(tdMsg)
+    tr.appendChild(tdKey)
+    tr.appendChild(tdProp)
+    tr.appendChild(tdHop)
+    tr.appendChild(tdTs)
+
+    gossipTbody.insertBefore(tr, gossipTbody.firstChild)
+
+    // Cap at 10 rows (T-03-02 — bounded panel)
+    while (gossipTbody.children.length > 10) {
+      gossipTbody.removeChild(gossipTbody.lastChild as Node)
+    }
+
+    // Unhide table, hide empty state
+    if (gossipTable) gossipTable.hidden = false
+    if (gossipEmptyState) gossipEmptyState.hidden = true
+  }
+
+  // ---------------------------------------------------------------------------
+  // updateLatencyStats — recompute and render p50/p95/p99 rows in latency-tbody
+  // ---------------------------------------------------------------------------
+
+  function updateLatencyStats(): void {
+    if (!latencyTbody) return
+
+    const types = ['sw-cache', 'peer-fetch', 'server-fallback'] as const
+    let firstUpdate = latencyTbody.children.length === 0
+
+    for (const type of types) {
+      const stats = accumulator.getStats(type)
+      let row = latencyTbody.querySelector(`tr[data-source-type="${type}"]`) as HTMLTableRowElement | null
+
+      if (!row) {
+        row = document.createElement('tr')
+        row.setAttribute('data-source-type', type)
+
+        const tdType = document.createElement('td')
+        const badge = document.createElement('span')
+        badge.className = `badge badge--${type}`
+        badge.textContent = type  // textContent (T-03-01)
+        tdType.appendChild(badge)
+
+        const tdP50 = document.createElement('td')
+        tdP50.className = 'col-right mono'
+        const tdP95 = document.createElement('td')
+        tdP95.className = 'col-right mono'
+        const tdP99 = document.createElement('td')
+        tdP99.className = 'col-right mono'
+        const tdCount = document.createElement('td')
+        tdCount.className = 'col-right mono'
+
+        row.appendChild(tdType)
+        row.appendChild(tdP50)
+        row.appendChild(tdP95)
+        row.appendChild(tdP99)
+        row.appendChild(tdCount)
+        latencyTbody.appendChild(row)
+        firstUpdate = true
+      }
+
+      const cells = row.querySelectorAll('td')
+      if (cells[1]) cells[1].textContent = `${stats.p50}ms`
+      if (cells[2]) cells[2].textContent = `${stats.p95}ms`
+      if (cells[3]) cells[3].textContent = `${stats.p99}ms`
+      if (cells[4]) cells[4].textContent = String(stats.count)
+    }
+
+    if (firstUpdate) {
+      if (latencyStatsTable) latencyStatsTable.hidden = false
+      if (latencyEmptyState) latencyEmptyState.hidden = true
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // handleMetricsEvent — dispatch to gossip panel, latency accumulator, event log
+  // ---------------------------------------------------------------------------
+
   function handleMetricsEvent(event: MetricsEvent): void {
-    // Update counters
-    if (event.type === 'sw-cache') {
+    // Gossip-propagation events go to the gossip panel only (not the main event log)
+    if (event.type === 'gossip-propagation') {
+      renderGossipRow(event)
+      return
+    }
+
+    // Update counters (peer-fetch counts as a cache hit for rate display)
+    if (event.type === 'sw-cache' || event.type === 'peer-fetch') {
       swCacheCount++
     } else if (event.type === 'server-fallback') {
       serverFallbackCount++
+    }
+
+    // Accumulate latency samples for percentile stats (METR-04)
+    if (event.type === 'sw-cache' || event.type === 'peer-fetch' || event.type === 'server-fallback') {
+      accumulator.record(event.type, event.latency_ms)
+      updateLatencyStats()
     }
 
     // Update hit rate displays
@@ -176,19 +372,16 @@ if (typeof document !== 'undefined') {
       const row = prepareRowData(event)
       const tr = document.createElement('tr')
 
-      // Type cell — badge chip
       const tdType = document.createElement('td')
       const badge = document.createElement('span')
       badge.className = `badge badge--${event.type}`
-      badge.textContent = event.type  // textContent is safe (T-03-01)
+      badge.textContent = event.type  // textContent (T-03-01)
       tdType.appendChild(badge)
 
-      // Key cell
       const tdKey = document.createElement('td')
       tdKey.className = 'mono'
       tdKey.textContent = row.key  // textContent (T-03-01)
 
-      // Latency cell
       const tdLatency = document.createElement('td')
       tdLatency.className = 'col-right'
       if (event.latency_ms >= 200) {
@@ -197,12 +390,10 @@ if (typeof document !== 'undefined') {
       }
       tdLatency.textContent = row.latency
 
-      // Source node ID cell (truncated to 8 chars)
       const tdNode = document.createElement('td')
       tdNode.className = 'mono'
       tdNode.textContent = row.sourceNodeId
 
-      // Timestamp cell
       const tdTs = document.createElement('td')
       tdTs.className = 'col-secondary'
       tdTs.textContent = row.timestamp
@@ -213,10 +404,9 @@ if (typeof document !== 'undefined') {
       tr.appendChild(tdNode)
       tr.appendChild(tdTs)
 
-      // Prepend new row at the top
       eventTbody.insertBefore(tr, eventTbody.firstChild)
 
-      // Cap at 50 rows — remove excess from the bottom (T-03-04)
+      // Cap at 50 rows (T-03-04)
       while (eventTbody.children.length > 50) {
         eventTbody.removeChild(eventTbody.lastChild as Node)
       }
@@ -244,7 +434,7 @@ if (typeof document !== 'undefined') {
       fetch(url)
         .then((res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
-          return res.json()
+          return res.text()
         })
         .then(() => {
           // Success — event will arrive via BroadcastChannel

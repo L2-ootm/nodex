@@ -99,7 +99,8 @@ async function getNodeIdFromSW(): Promise<string> {
       2000
     )
 
-    channel.port2.onmessage = (event: MessageEvent) => {
+    // port2 is transferred to SW; port1 stays here to receive the reply
+    channel.port1.onmessage = (event: MessageEvent) => {
       if (event.data?.type === 'NODE_ID' && event.data.nodeId) {
         clearTimeout(timeout)
         resolve(event.data.nodeId as string)
