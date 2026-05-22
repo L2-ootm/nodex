@@ -13,7 +13,7 @@ async function createContext(browser: Browser): Promise<BrowserContext> {
 
 async function openAndWait(ctx: BrowserContext): Promise<Page> {
   const page = await ctx.newPage()
-  await page.goto('http://localhost:3000', { waitUntil: 'domcontentloaded' })
+  await page.goto('http://localhost:4173', { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
   return page
 }

@@ -50,7 +50,7 @@ describe('mock-api', () => {
 
   it('Test 6: GET /api/products/1 returns Access-Control-Allow-Origin header (CORS)', async () => {
     const res = await app.request('/api/products/1', {
-      headers: { Origin: 'http://localhost:3000' },
+      headers: { Origin: 'http://localhost:4173' },
     })
     const corsHeader = res.headers.get('Access-Control-Allow-Origin')
     expect(corsHeader).not.toBeNull()

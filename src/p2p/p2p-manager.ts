@@ -11,7 +11,7 @@ import {
   DC_CACHE_FETCH_ID,
   METRICS_CHANNEL_NAME,
 } from '../shared/config.js'
-import type { SignalingMessage, PeerFetchRequest, PeerFetchResponse } from '../shared/types.js'
+import type { SignalingMessage, GossipMessage, PeerFetchRequest, PeerFetchResponse } from '../shared/types.js'
 import { GossipEngine, _resetForTest as _resetGossipForTest } from '../gossip/gossip-engine.js'
 
 // Per-connection state model (includes Perfect Negotiation flags)
@@ -321,22 +321,29 @@ function handleSwMessage(event: MessageEvent): void {
 // handleSignalingMessage — process incoming signaling WS messages
 // ---------------------------------------------------------------------------
 
-async function handleSignalingMessage(msg: SignalingMessage): Promise<void> {
-  if (msg.type === 'JOIN_ACK') {
-    const peers = msg.peers ?? []
+async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Promise<void> {
+  // Server-seeded invalidations arrive via signaling WebSocket (mock-api /api/gossip-seed)
+  if (msg.type === 'GOSSIP_INVALIDATE') {
+    gossipEngine.onmessage(msg, 'server')
+    return
+  }
+
+  const sigMsg = msg as SignalingMessage
+  if (sigMsg.type === 'JOIN_ACK') {
+    const peers = sigMsg.peers ?? []
     // peers[0..PEER_FANOUT-1] = local; peers[PEER_FANOUT..PEER_FANOUT+LONG_RANGE_PEER_COUNT-1] = long-range
     for (let i = 0; i < peers.length; i++) {
       const role: 'local' | 'long-range' = i < PEER_FANOUT ? 'local' : 'long-range'
-      connectToPeer(peers[i], !!msg.polite, role)
+      connectToPeer(peers[i], !!sigMsg.polite, role)
     }
     return
   }
 
-  if (!msg.from) return
-  const from = msg.from
+  if (!sigMsg.from) return
+  const from = sigMsg.from
 
-  if (msg.type === 'OFFER' || msg.type === 'ANSWER') {
-    if (!msg.sdp) return
+  if (sigMsg.type === 'OFFER' || sigMsg.type === 'ANSWER') {
+    if (!sigMsg.sdp) return
 
     // Accept inbound connections from peers we haven't seen yet (polite: true)
     if (!connections.has(from)) {
@@ -345,7 +352,7 @@ async function handleSignalingMessage(msg: SignalingMessage): Promise<void> {
     const conn = connections.get(from)
     if (!conn) return
 
-    const description = msg.sdp as RTCSessionDescriptionInit
+    const description = sigMsg.sdp as RTCSessionDescriptionInit
     const offerCollision =
       description.type === 'offer' &&
       (conn.makingOffer || conn.pc.signalingState !== 'stable')
@@ -368,12 +375,12 @@ async function handleSignalingMessage(msg: SignalingMessage): Promise<void> {
     } catch (err) {
       console.warn('[p2p] setRemoteDescription error:', err)
     }
-  } else if (msg.type === 'ICE_CANDIDATE') {
-    if (!msg.candidate) return
+  } else if (sigMsg.type === 'ICE_CANDIDATE') {
+    if (!sigMsg.candidate) return
     const conn = connections.get(from)
     if (!conn) return
     try {
-      await conn.pc.addIceCandidate(msg.candidate as RTCIceCandidateInit)
+      await conn.pc.addIceCandidate(sigMsg.candidate as RTCIceCandidateInit)
     } catch (err) {
       if (!conn.ignoreOffer) {
         console.warn('[p2p] addIceCandidate error:', err)
@@ -415,9 +422,9 @@ async function init(): Promise<void> {
   })
 
   ws.addEventListener('message', (event) => {
-    let msg: SignalingMessage
+    let msg: SignalingMessage | GossipMessage
     try {
-      msg = JSON.parse(event.data as string) as SignalingMessage
+      msg = JSON.parse(event.data as string) as SignalingMessage | GossipMessage
     } catch {
       return
     }

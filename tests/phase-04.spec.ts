@@ -4,7 +4,7 @@ import { test, expect, Browser, BrowserContext, Page } from '@playwright/test'
 // Covers VOL-01 through VOL-06
 //
 // Infrastructure (same as phase-03):
-//   - Vite preview server:     http://localhost:3000
+//   - Vite preview server:     http://localhost:4173
 //   - Hono mock API:           http://localhost:3001
 //   - Signaling server (P2P):  http://localhost:3002
 //
@@ -22,7 +22,7 @@ async function createContext(browser: Browser): Promise<BrowserContext> {
 
 async function openAndWait(ctx: BrowserContext): Promise<Page> {
   const page = await ctx.newPage()
-  await page.goto('http://localhost:3000', { waitUntil: 'domcontentloaded' })
+  await page.goto('http://localhost:4173', { waitUntil: 'domcontentloaded' })
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
   return page
 }

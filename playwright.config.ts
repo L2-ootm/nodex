@@ -4,7 +4,7 @@ export default defineConfig({
   timeout: 30000,
   testDir: 'tests',
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: 'http://localhost:4173',
     serviceWorkers: 'allow',
   },
   projects: [
@@ -23,8 +23,8 @@ export default defineConfig({
       // Build first, then serve the built dist/ in preview mode (which includes sw.js).
       // Dev mode (vite-plugin-pwa injectManifest) does not serve sw.js at /sw.js in dev.
       // preview mode also proxies /api/* to port 3001 via vite.config.ts preview.proxy.
-      command: 'npm run build && npx vite preview --port 3000 --strictPort',
-      port: 3000,
+      command: 'npm run build && npx vite preview --port 4173 --strictPort',
+      port: 4173,
       reuseExistingServer: true,
       timeout: 120000,
     },

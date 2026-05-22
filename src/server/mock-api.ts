@@ -2,7 +2,7 @@
 // Hono mock API server — AES-GCM-256 encrypted product responses (Phase 3)
 // Routes: GET /api/products/:id (encrypted ciphertext), GET /api/session-key,
 //         POST /api/gossip-seed, POST /api/invalidate/:path, GET /api/__test__/seq/:path
-// CORS: allows http://localhost:3000 so SW fetch() gets readable responses (not opaque)
+// CORS: allows localhost:4173 (Playwright preview) and localhost:5173 (dev) for CORS-safe SW fetch()
 
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
@@ -15,7 +15,7 @@ const app = new Hono()
 // CORS must be applied BEFORE route handlers (Pitfall 7 — critical blocker if missed)
 // Opaque responses make response.headers.get('X-Nodex-Seq') return null, breaking the
 // entire freshness system.
-app.use('*', cors({ origin: 'http://localhost:3000' }))
+app.use('*', cors({ origin: ['http://localhost:4173', 'http://localhost:5173'] }))
 
 // In-memory sequence counter — exported for test access (per D-10 and CONTEXT.md specifics)
 export const seqCounters = new Map<string, number>()
