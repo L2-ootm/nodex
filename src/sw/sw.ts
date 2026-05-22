@@ -24,6 +24,7 @@ import {
   CACHE_URL_PREFIX,
   CACHE_NAME,
   META_STORE,
+  METRICS_CHANNEL_NAME,
   P2P_FETCH_TIMEOUT_MS,
   VOL_COLD_START,
   VOL_P2P_GATE,
@@ -32,7 +33,7 @@ import {
 } from '../shared/config.js'
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { decrypt as aesDecode } from '../crypto/crypto.js'
-import { computeScore, classifyTier } from '../volatility/volatility.js'
+import { computeScore, classifyTier, deriveTTL } from '../volatility/volatility.js'
 
 declare const self: ServiceWorkerGlobalScope
 
@@ -165,7 +166,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           // Broadcast volatility-update to dashboard for live tier display (VOL-04)
           try {
             const tier = classifyTier(score)
-            const ch = new BroadcastChannel('nodex-metrics')
+            const ch = new BroadcastChannel(METRICS_CHANNEL_NAME)
             ch.postMessage({ type: 'volatility-update', key, score, tier })
             ch.close()
           } catch {
@@ -263,6 +264,18 @@ async function handleRequest(request: Request): Promise<Response> {
     if (isFresh(key, cachedSeq)) {
       // Fresh cache hit — update LRU timestamp (best-effort)
       await touchAccessedAt(key)
+
+      // Increment access_count in volatility ledger (best-effort, CR-01)
+      getDb().then(db => {
+        return db.get(VOLATILITY_STORE, key).then(existing => {
+          if (existing) {
+            const updated: VolatilityEntry = { ...existing, access_count: existing.access_count + 1 }
+            return db.put(VOLATILITY_STORE, updated).then(() => {
+              scoreCache.set(key, computeScore(updated))
+            })
+          }
+        })
+      }).catch(() => { /* best-effort — volatility ledger is non-critical */ })
 
       // Emit sw-cache metric (D-14)
       const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
@@ -397,8 +410,14 @@ async function fetchAndCache(
     seq = 1
   }
 
+  // Derive TTL from current volatility score and pass to putCachedEntry (CR-02)
+  // putCachedEntry skips caching entirely when ttl_ms === 0 (ephemeral tier)
+  const currentScore = scoreCache.get(key) ?? VOL_COLD_START
+  const tier = classifyTier(currentScore)
+  const ttl_ms = deriveTTL(tier)
+
   // Store in Cache Storage + IDB via cache.ts (handles LRU eviction, response.clone())
-  await putCachedEntry(key, response, seq)
+  await putCachedEntry(key, response, seq, ttl_ms)
 
   // Update in-memory seq map (self-seeding — D-09)
   updateSeq(key, seq)

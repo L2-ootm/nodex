@@ -92,6 +92,24 @@ export async function getCachedEntry(
 
   if (!meta) return null
 
+  // TTL expiry check (CR-02): if ttl_ms is set and the entry has expired, treat as a miss
+  if (meta.ttl_ms !== undefined && meta.cached_at !== undefined) {
+    const age_ms = Date.now() - meta.cached_at
+    if (age_ms >= meta.ttl_ms) {
+      console.log('[cache] TTL expired for:', key, `age=${age_ms}ms ttl=${meta.ttl_ms}ms`)
+      // Best-effort eviction of the expired entry
+      try {
+        const cache = await self.caches.open(CACHE_NAME)
+        await cache.delete(key)
+      } catch { /* best-effort */ }
+      try {
+        const db2 = await getDb()
+        await db2.delete(META_STORE, key)
+      } catch { /* best-effort */ }
+      return null
+    }
+  }
+
   return { response: cachedResponse, meta }
 }
 
@@ -106,12 +124,19 @@ export async function getCachedEntry(
  * @param key      Cache key (pathname)
  * @param response The Response to store (will be cloned internally — caller retains original)
  * @param seq      The X-Nodex-Seq value from the response header
+ * @param ttl_ms   Optional TTL in ms from deriveTTL; 0 = ephemeral (skip caching); absent = stable/no expiry
  */
 export async function putCachedEntry(
   key: string,
   response: Response,
-  seq: number
+  seq: number,
+  ttl_ms?: number
 ): Promise<void> {
+  // Ephemeral keys (TTL = 0ms) must not be cached — skip write entirely (CR-02)
+  if (ttl_ms === 0) {
+    console.log('[cache] Skipping ephemeral key (ttl_ms=0):', key)
+    return
+  }
   if (key.startsWith('__')) return
   if (response.type === 'opaque') {
     console.warn('[cache] Skipping opaque response for:', key)
@@ -162,11 +187,13 @@ export async function putCachedEntry(
   // --- Write IDB metadata ---
   try {
     const db = await getDb()
+    const now = Date.now()
     const meta: CacheMeta = {
       path: key,
       seq,
-      accessed_at: Date.now(),
+      accessed_at: now,
       byte_size: byteSize,
+      ...(ttl_ms !== undefined ? { ttl_ms, cached_at: now } : {}),
     }
     await db.put(META_STORE, meta)
   } catch (err) {

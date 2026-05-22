@@ -23,6 +23,8 @@ export interface CacheMeta {
   seq: number
   accessed_at: number      // epoch ms
   byte_size: number        // estimated response body bytes
+  ttl_ms?: number          // optional TTL in ms derived from volatility tier; 0 = no caching; absent = no expiry
+  cached_at?: number       // epoch ms when the entry was written; paired with ttl_ms for expiry check
 }
 
 export interface VolatilityEntry {
