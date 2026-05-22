@@ -14,8 +14,8 @@ describe('p2p-manager', () => {
   it('reqId correlation routes response to correct resolver', () => {
     const called: string[] = []
 
-    pendingRequests.set('req-A', (_r) => { called.push('A') })
-    pendingRequests.set('req-B', (_r) => { called.push('B') })
+    pendingRequests.set('req-A', { resolver: (_r: PeerFetchResponse) => { called.push('A') }, peerId: 'peer-1' })
+    pendingRequests.set('req-B', { resolver: (_r: PeerFetchResponse) => { called.push('B') }, peerId: 'peer-2' })
 
     // Simulate incoming CACHE_FETCH_RESPONSE matching req-A
     const data: PeerFetchResponse = {
@@ -25,9 +25,9 @@ describe('p2p-manager', () => {
       payload: '{"data":1}',
     }
 
-    const resolver = pendingRequests.get(data.reqId)
-    if (resolver) {
-      resolver(data)
+    const entry = pendingRequests.get(data.reqId)
+    if (entry) {
+      entry.resolver(data)
       pendingRequests.delete(data.reqId)
     }
 

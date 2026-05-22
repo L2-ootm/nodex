@@ -30,10 +30,7 @@ export function calculateHitRate(swCacheCount: number, serverFallbackCount: numb
  * Strips trailing zeros from decimal representation.
  */
 export function formatLatency(latency_ms: number): string {
-  const formatted = Number.isInteger(latency_ms)
-    ? String(latency_ms)
-    : latency_ms.toFixed(2)
-  return `${formatted}ms`
+  return `${String(latency_ms)}ms`
 }
 
 /**
