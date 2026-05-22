@@ -37,7 +37,9 @@ import type { VolatilityEntry } from '../shared/types.js'
  */
 export function computeScore(entry: VolatilityEntry, now: number = Date.now()): number {
   const change_frequency = Math.min(entry.change_count / VOL_CHANGE_BASELINE, 1)
-  const recency_decay = 1 - Math.min((now - entry.last_changed_at) / VOL_DECAY_WINDOW_MS, 1)
+  // Clamp both ends: prevents > 1 when last_changed_at is in the future (clock skew) (WR-03)
+  const recency_raw = (now - entry.last_changed_at) / VOL_DECAY_WINDOW_MS
+  const recency_decay = 1 - Math.min(Math.max(recency_raw, 0), 1)
   const access_frequency = Math.min(entry.access_count / VOL_ACCESS_BASELINE, 1)
 
   const raw =
