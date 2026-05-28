@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nodex Metrics</title>
+  <script type="module" crossorigin src="/assets/metrics-CJdF_OgG.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/p2p-manager-BDJiuEMk.js">
+  <link rel="stylesheet" crossorigin href="/assets/metrics-CBy_WeCU.css">
+<link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
+<body>
+
+  <!-- Page Header -->
+  <header class="page-header">
+    <span class="live-dot" id="live-dot" aria-label="Service Worker connection status"></span>
+    <span class="page-header__title">Nodex Metrics</span>
+    <div class="page-header__chips">
+      <span id="sw-status-chip">SW: loading...</span>
+      <span id="buffer-chip">Buffer: 0</span>
+    </div>
+  </header>
+
+  <main class="main">
+
+    <!-- SW not-detected banner (hidden by default) -->
+    <div class="sw-banner" id="sw-banner" hidden>
+      Service Worker not registered. Ensure sw.js is served from the page origin.
+    </div>
+
+    <!-- Hit Rate Summary -->
+    <div class="stat-cards">
+      <div class="stat-card">
+        <span class="stat-display" id="hit-rate-display">0.0%</span>
+        <span class="stat-label">Cache Hit Rate</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-display" id="fallback-display">0.0%</span>
+        <span class="stat-label">Server Fallback</span>
+      </div>
+    </div>
+
+    <!-- Event Log Table -->
+    <section class="section-panel">
+      <div class="section-panel__header">
+        <h2>Event Log</h2>
+      </div>
+
+      <!-- Empty state -->
+      <div class="empty-state" id="empty-state">
+        <p class="empty-state__heading">No events yet</p>
+        <p class="empty-state__body">Trigger a fetch request above to start recording cache decisions.</p>
+      </div>
+
+      <table class="event-table" aria-label="Cache decision events">
+        <thead>
+          <tr>
+            <th scope="col">Type</th>
+            <th scope="col">Key</th>
+            <th scope="col" class="col-right">latency_ms</th>
+            <th scope="col">source_node_id</th>
+            <th scope="col">Timestamp</th>
+          </tr>
+        </thead>
+        <tbody id="event-tbody">
+          <!-- Rows prepended by dashboard.ts -->
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Request Trigger Form -->
+    <section class="section-panel">
+      <div class="section-panel__header">
+        <h2>Request Trigger</h2>
+      </div>
+      <div class="section-panel__body">
+        <form class="trigger-form" id="fetch-form" novalidate>
+          <div class="form-row">
+            <label class="form-label" for="product-id">Product ID:</label>
+            <input
+              type="text"
+              class="input-field"
+              id="product-id"
+              name="product-id"
+              placeholder="1"
+              value="1"
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn--primary" id="fetch-btn">
+              Fetch Product
+            </button>
+          </div>
+          <span class="form-feedback form-feedback--error" id="fetch-error"></span>
+        </form>
+      </div>
+    </section>
+
+    <!-- Invalidate Trigger Form -->
+    <section class="section-panel">
+      <div class="section-panel__header">
+        <h2>Invalidate Path</h2>
+      </div>
+      <div class="section-panel__body">
+        <form class="trigger-form" id="invalidate-form" novalidate>
+          <div class="form-row">
+            <label class="form-label" for="invalidate-path">Path:</label>
+            <input
+              type="text"
+              class="input-field"
+              id="invalidate-path"
+              name="invalidate-path"
+              placeholder="/api/products/1"
+              value="/api/products/1"
+              autocomplete="off"
+            />
+            <button type="submit" class="btn btn--destructive" id="invalidate-btn">
+              Invalidate Path
+            </button>
+          </div>
+          <span class="form-feedback" id="invalidate-result"></span>
+        </form>
+      </div>
+    </section>
+
+    <!-- Volatility Tiers Panel (Phase 4, VOL-04) -->
+    <section class="section-panel" id="volatility-panel" hidden>
+      <div class="section-panel__header">
+        <h2>Volatility Tiers</h2>
+      </div>
+
+      <div class="empty-state" id="volatility-empty-state">
+        <p class="empty-state__heading">No volatility data yet</p>
+        <p class="empty-state__body">Trigger gossip invalidations to see per-key volatility scores.</p>
+      </div>
+
+      <table class="event-table" id="volatility-table" aria-label="Per-key volatility tiers" hidden>
+        <thead>
+          <tr>
+            <th scope="col">Key</th>
+            <th scope="col">Tier</th>
+            <th scope="col" class="col-right">Score</th>
+          </tr>
+        </thead>
+        <tbody id="volatility-tbody">
+          <!-- Rows upserted by dashboard.ts on volatility-update events -->
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+
+</body>
+</html>
