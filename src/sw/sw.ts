@@ -17,7 +17,7 @@
 /// <reference lib="webworker" />
 
 import { getDb } from './idb.js'
-import { seedSeqMap, updateSeq, isFresh } from './freshness.js'
+import { seedSeqMap, updateSeq, isFresh, getLatestSeq } from './freshness.js'
 import { getCachedEntry, putCachedEntry, touchAccessedAt } from './cache.js'
 import { emitMetric, flushBuffer, getNodeId } from './metrics.js'
 import {
@@ -30,17 +30,162 @@ import {
   VOL_P2P_GATE,
   VOLATILITY_STORE,
   ENCRYPTION_KEY_ID,
+  DEFAULT_API_ORIGIN,
 } from '../shared/config.js'
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
-import { decrypt as aesDecode } from '../crypto/crypto.js'
+import { buildPayloadAad, decrypt as aesDecode } from '../crypto/crypto.js'
 import { computeScore, classifyTier, deriveTTL } from '../volatility/volatility.js'
 
 declare const self: ServiceWorkerGlobalScope
 
 const SW_VERSION = '1.0.0'
 
+// Build-time API origin — injected by Vite from VITE_NODEX_BETA_API_URL; falls back to local dev default
+const SW_API_ORIGIN: string =
+  (typeof (import.meta as { env?: Record<string, string> }).env !== 'undefined'
+    ? (import.meta as { env?: Record<string, string> }).env?.['VITE_NODEX_BETA_API_URL']?.replace(/\/$/, '')
+    : undefined) ?? DEFAULT_API_ORIGIN
+
 // Session keys imported via IMPORT_SESSION_KEY postMessage (CRPT-02)
 const sessionKeys = new Map<string, CryptoKey>()
+const runtimeFlags = {
+  disableP2P: false,
+  disableCacheRead: false,
+}
+
+async function importSessionKey(keyId: string, keyBytes: string): Promise<void> {
+  const raw = Uint8Array.from(atob(keyBytes), (c) => c.charCodeAt(0))
+  const cryptoKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, true, ['decrypt'])
+  sessionKeys.set(keyId, cryptoKey)
+}
+
+async function ensureSessionKey(keyId: string): Promise<CryptoKey | null> {
+  const existing = sessionKeys.get(keyId)
+  if (existing) return existing
+
+  try {
+    const res = await fetch('/api/session-key', { mode: 'cors' })
+    if (!res.ok) return null
+    const data = await res.json() as { keyId: string; keyBytes: string }
+    await importSessionKey(data.keyId, data.keyBytes)
+    return sessionKeys.get(keyId) ?? null
+  } catch (err) {
+    console.warn('[SW] ensureSessionKey failed:', err)
+    return null
+  }
+}
+
+async function decryptPayloadResponse(key: string, response: Response, seq: number): Promise<Response> {
+  const iv = response.headers.get('X-Nodex-Iv')
+  const keyId = response.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
+  if (!iv) {
+    return response
+  }
+
+  const cryptoKey = await ensureSessionKey(keyId)
+  if (!cryptoKey) {
+    console.warn('[SW] Missing session key for encrypted response:', keyId)
+    return new Response('Decrypt key unavailable', { status: 502 })
+  }
+
+  try {
+    const ciphertext = await response.text()
+    const ctBytes = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0))
+    const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0))
+    const plaintext = await aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, seq, keyId))
+    return new Response(new TextDecoder().decode(plaintext), {
+      status: response.status,
+      statusText: response.statusText,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Nodex-Seq': String(seq),
+      },
+    })
+  } catch (err) {
+    console.warn('[SW] decrypt response failed:', err)
+    return new Response('Decrypt error', { status: 502 })
+  }
+}
+
+async function getCacheState(key: string): Promise<{
+  key: string
+  hasCache: boolean
+  latestSeq: number
+  cachedSeq: number
+}> {
+  let hasCache = false
+  let cachedSeq = 0
+
+  try {
+    const cache = await caches.open(CACHE_NAME)
+    hasCache = (await cache.match(key)) !== undefined
+  } catch {
+    hasCache = false
+  }
+
+  try {
+    const db = await getDb()
+    const meta = await db.get(META_STORE, key)
+    cachedSeq = meta?.seq ?? 0
+  } catch {
+    cachedSeq = 0
+  }
+
+  return {
+    key,
+    hasCache,
+    latestSeq: getLatestSeq(key),
+    cachedSeq,
+  }
+}
+
+async function revalidateKey(key: string): Promise<{
+  key: string
+  localSeqBefore: number
+  serverSeq: number
+  repaired: boolean
+  deletedCache: boolean
+}> {
+  const localSeqBefore = getLatestSeq(key)
+  let serverSeq = localSeqBefore
+
+  try {
+    const res = await fetch(`${SW_API_ORIGIN}/api/__test__/seq${key}`, { mode: 'cors' })
+    if (res.ok) {
+      const body = await res.json() as { seq: number }
+      if (Number.isInteger(body.seq) && body.seq > 0) {
+        serverSeq = body.seq
+      }
+    }
+  } catch (err) {
+    console.warn('[SW] REVALIDATE_KEY seq fetch failed:', err)
+  }
+
+  let deletedCache = false
+  if (serverSeq > localSeqBefore) {
+    updateSeq(key, serverSeq)
+    try {
+      const cache = await caches.open(CACHE_NAME)
+      deletedCache = await cache.delete(key)
+    } catch (err) {
+      console.warn('[SW] REVALIDATE_KEY cache delete failed:', err)
+    }
+    try {
+      const db = await getDb()
+      await db.delete(META_STORE, key)
+    } catch {
+      // best-effort IDB delete
+    }
+  }
+
+  return {
+    key,
+    localSeqBefore,
+    serverSeq,
+    repaired: serverSeq > localSeqBefore,
+    deletedCache,
+  }
+}
 
 // In-memory volatility score cache — seeded from IDB on activate, refreshed on GOSSIP_INVALIDATE
 // Lookup is O(1) synchronous; no IDB reads in the fetch event hot path (VOL-05)
@@ -183,14 +328,36 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
     event.waitUntil(
       (async () => {
         try {
-          const raw = Uint8Array.from(atob(keyBytes), (c) => c.charCodeAt(0))
-          const cryptoKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, true, ['decrypt'])
-          sessionKeys.set(keyId, cryptoKey)
+          await importSessionKey(keyId, keyBytes)
           console.log('[SW] session key imported:', keyId)
         } catch (err) {
           console.warn('[SW] IMPORT_SESSION_KEY failed:', err)
         }
       })()
+    )
+  } else if (type === 'SET_RUNTIME_FLAGS') {
+    const flags = event.data?.flags as { disableP2P?: boolean; disableCacheRead?: boolean } | undefined
+    runtimeFlags.disableP2P = Boolean(flags?.disableP2P)
+    runtimeFlags.disableCacheRead = Boolean(flags?.disableCacheRead)
+    const replyPort = event.ports[0]
+    if (replyPort) {
+      replyPort.postMessage({ type: 'SET_RUNTIME_FLAGS_RESULT', flags: { ...runtimeFlags } })
+    }
+  } else if (type === 'GET_CACHE_STATE') {
+    const { key } = event.data as { key: string }
+    const replyPort = event.ports[0]
+    event.waitUntil(
+      getCacheState(key).then((state) => {
+        replyPort?.postMessage({ type: 'GET_CACHE_STATE_RESULT', ...state })
+      })
+    )
+  } else if (type === 'REVALIDATE_KEY') {
+    const { key } = event.data as { key: string }
+    const replyPort = event.ports[0]
+    event.waitUntil(
+      revalidateKey(key).then((result) => {
+        replyPort?.postMessage({ type: 'REVALIDATE_KEY_RESULT', ...result })
+      })
     )
   } else if (type === 'P2P_FETCH_SERVE') {
     // Serve cached payload to a requesting peer via score gate (T-04-04, VOL-05 D-10)
@@ -213,6 +380,10 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           }
           const payload = await cached.text()
           const seq = parseInt(cached.headers.get('X-Nodex-Seq') ?? '1', 10)
+          if (!isFresh(key, seq)) {
+            replyPort?.postMessage({ found: false })
+            return
+          }
           const iv = cached.headers.get('X-Nodex-Iv') ?? ''
           const keyId = cached.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
           // Re-serve the encrypted payload as-is (server stores ciphertext; SW never decrypts for peer serve)
@@ -236,9 +407,17 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
 self.addEventListener('fetch', (event: FetchEvent) => {
   const { request } = event
 
-  // Only intercept GET requests to the /api/ prefix (D-05, D-08)
-  if (request.method !== 'GET' || !request.url.includes(CACHE_URL_PREFIX)) {
-    // Non-/api/ or non-GET: fall through to the network (no respondWith call)
+  // Only intercept same-origin GET requests to the /api/ prefix (D-05, D-08).
+  // Cross-origin requests (e.g. to nodex-beta-api.vercel.app) must pass through
+  // unmodified so that Authorization headers reach the API server.
+  const url = new URL(request.url)
+  if (
+    request.method !== 'GET' ||
+    url.origin !== self.location.origin ||
+    !url.pathname.startsWith(CACHE_URL_PREFIX) ||
+    url.pathname === '/api/session-key'
+  ) {
+    // Non-/api/, non-GET, or cross-origin: fall through to the network
     return
   }
 
@@ -255,7 +434,7 @@ async function handleRequest(request: Request): Promise<Response> {
   const start = self.performance.now()
 
   // --- Cache lookup using cache.ts ---
-  const cached = await getCachedEntry(key)
+  const cached = runtimeFlags.disableCacheRead ? null : await getCachedEntry(key)
 
   if (cached) {
     const { response, meta } = cached
@@ -282,7 +461,7 @@ async function handleRequest(request: Request): Promise<Response> {
       await emitMetric({ type: 'sw-cache', key, latency_ms })
 
       console.log('[SW] cache-hit (fresh):', key)
-      return response
+      return decryptPayloadResponse(key, response, cachedSeq)
     }
 
     // Stale: cached seq is behind the latest known seq — fall through to server fetch
@@ -299,11 +478,13 @@ async function handleRequest(request: Request): Promise<Response> {
   }
 
   // --- P2P peer fetch (200ms race timeout, PEER-06) ---
-  const peerResponse = await tryPeerFetch(key)
-  if (peerResponse) {
-    const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
-    await emitMetric({ type: 'peer-fetch', key, latency_ms })
-    return peerResponse
+  if (!runtimeFlags.disableP2P) {
+    const peerResponse = await tryPeerFetch(key)
+    if (peerResponse) {
+      const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
+      await emitMetric({ type: 'peer-fetch', key, latency_ms })
+      return peerResponse
+    }
   }
 
   // --- Server fallback ---
@@ -347,9 +528,31 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
         }
         const ctBytes = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0))
         const ivBytes = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0))
+        if (!isFresh(key, parsed.seq)) {
+          resolve(null)
+          return
+        }
         // aesDecode throws DOMException(OperationError) on tamper/wrong key → server fallback (CRPT-03)
-        aesDecode(ctBytes, ivBytes, cryptoKey)
-          .then((plaintext: Uint8Array) => {
+        aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, parsed.seq, parsed.keyId))
+          .then(async (plaintext: Uint8Array) => {
+            const currentScore = scoreCache.get(key) ?? VOL_COLD_START
+            const tier = classifyTier(currentScore)
+            const ttl_ms = deriveTTL(tier)
+            await putCachedEntry(
+              key,
+              new Response(parsed.ciphertext, {
+                status: 200,
+                headers: {
+                  'Content-Type': 'text/plain',
+                  'X-Nodex-Seq': String(parsed.seq),
+                  'X-Nodex-Iv': parsed.iv,
+                  'X-Nodex-Key-Id': parsed.keyId,
+                },
+              }),
+              parsed.seq,
+              ttl_ms
+            )
+            updateSeq(key, parsed.seq)
             resolve(
               new Response(new TextDecoder().decode(plaintext), {
                 status: 200,
@@ -427,5 +630,5 @@ async function fetchAndCache(
   await emitMetric({ type: 'server-fallback', key, latency_ms })
 
   console.log('[SW] server-fallback cached:', key, 'seq=', seq)
-  return response
+  return decryptPayloadResponse(key, response, seq)
 }

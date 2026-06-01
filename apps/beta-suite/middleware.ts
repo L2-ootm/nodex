@@ -5,6 +5,8 @@ export const config = {
     '/api/signal/:path*',
     '/api/session-key',
     '/api/turn-credentials',
+    '/api/invalidate/(.*)',  // (.*) needed to match nested paths like /products/1
+    '/api/products/:path*',
   ],
 }
 
@@ -13,15 +15,19 @@ const buckets = new Map<string, Bucket>()
 const WINDOW_MS = 60_000
 
 const LIMITS: Record<string, number> = {
-  signal: 120,   // 500ms poll × 2 testers × headroom
-  key: 20,       // fetched once on load
-  turn: 20,      // fetched once on init
+  signal: 1200,    // 2 nodes × 2req/s (poll+preflight) × 60s × headroom
+  key: 20,         // fetched once on load
+  turn: 20,        // fetched once on init
+  invalidate: 10,  // admin-only, infrequent
+  products: 200,   // product reads, CDN-style
 }
 
 function routeGroup(pathname: string): string | null {
   if (pathname.startsWith('/api/signal/')) return 'signal'
   if (pathname === '/api/session-key') return 'key'
   if (pathname === '/api/turn-credentials') return 'turn'
+  if (pathname.startsWith('/api/invalidate/')) return 'invalidate'
+  if (pathname.startsWith('/api/products/')) return 'products'
   return null
 }
 
@@ -46,6 +52,9 @@ export function middleware(req: NextRequest) {
       headers: {
         'Content-Type': 'application/json',
         'Retry-After': '60',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Headers': 'authorization,content-type',
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       },
     })
   }

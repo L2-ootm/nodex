@@ -435,6 +435,17 @@ async function fetchTurnCredentials(apiOrigin: string, token: string): Promise<v
   }
 }
 
+async function waitForSwController(timeoutMs = 8000): Promise<ServiceWorker | null> {
+  if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller
+  return new Promise<ServiceWorker | null>((resolve) => {
+    const timer = setTimeout(() => resolve(null), timeoutMs)
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      clearTimeout(timer)
+      resolve(navigator.serviceWorker.controller)
+    }, { once: true })
+  })
+}
+
 async function importSessionKeyFromServer(apiOrigin: string, token: string): Promise<void> {
   if (!token) return
   try {
@@ -446,13 +457,20 @@ async function importSessionKeyFromServer(apiOrigin: string, token: string): Pro
       return
     }
     const body = await res.json() as { keyId?: string; keyBytes?: string }
-    if (body.keyBytes && body.keyId && navigator.serviceWorker.controller) {
-      const raw = Uint8Array.from(atob(body.keyBytes), (c) => c.charCodeAt(0))
-      navigator.serviceWorker.controller.postMessage({
-        type: 'IMPORT_SESSION_KEY',
-        keyId: body.keyId,
-        keyBytes: raw,
-      }, [raw.buffer])
+    if (body.keyBytes && body.keyId) {
+      // Wait for the SW to claim this page before sending IMPORT_SESSION_KEY.
+      // init() may run before SW activation completes; a null controller drops the message.
+      const controller = await waitForSwController()
+      if (controller) {
+        // Send the base64 string — the SW's importSessionKey does atob() internally.
+        controller.postMessage({
+          type: 'IMPORT_SESSION_KEY',
+          keyId: body.keyId,
+          keyBytes: body.keyBytes,
+        })
+      } else {
+        console.warn('[p2p] session key: SW controller not available, key not imported')
+      }
     }
   } catch (err) {
     console.warn('[p2p] session key import error:', err)
@@ -469,10 +487,16 @@ function getHttpSignalingBase(): string | null {
   return configured.replace(/\/$/, '')
 }
 
-async function postHttpSignal(baseUrl: string, path: string, body: unknown, signal?: AbortSignal): Promise<Response> {
+function signalAuthHeaders(token: string): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  return headers
+}
+
+async function postHttpSignal(baseUrl: string, path: string, body: unknown, signal?: AbortSignal, token = ''): Promise<Response> {
   return fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: signalAuthHeaders(token),
     body: JSON.stringify(body),
     signal,
   })
@@ -482,8 +506,9 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
   signalingAbortController?.abort()
   signalingAbortController = new AbortController()
   const signal = signalingAbortController.signal
+  const token = (runtimeConfig ?? resolveNodexRuntimeConfig()).apiToken
 
-  const joinRes = await postHttpSignal(baseUrl, '/join', { roomId: currentRoomId, nodeId: currentNodeId }, signal)
+  const joinRes = await postHttpSignal(baseUrl, '/join', { roomId: currentRoomId, nodeId: currentNodeId }, signal, token)
   if (!joinRes.ok) throw new Error(`[p2p] HTTP signaling join failed: ${joinRes.status}`)
   const join = await joinRes.json() as { peers?: string[]; polite?: boolean; after?: number }
 
@@ -495,7 +520,7 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
       } catch {
         return
       }
-      void postHttpSignal(baseUrl, '/send', { roomId: currentRoomId, message }, signal).catch((err) => {
+      void postHttpSignal(baseUrl, '/send', { roomId: currentRoomId, message }, signal, token).catch((err) => {
         if (!signal.aborted) console.warn('[p2p] HTTP signaling send failed:', err)
       })
     },
@@ -505,7 +530,7 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
       signalingPollTimer = null
       signalingAbortController = null
       signalingTransport = null
-      void postHttpSignal(baseUrl, '/leave', { roomId: currentRoomId, nodeId: currentNodeId }).catch(() => undefined)
+      void postHttpSignal(baseUrl, '/leave', { roomId: currentRoomId, nodeId: currentNodeId }, undefined, token).catch(() => undefined)
     },
   }
 
@@ -523,12 +548,15 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
     url.searchParams.set('roomId', currentRoomId)
     url.searchParams.set('nodeId', currentNodeId)
     url.searchParams.set('after', String(after))
-    fetch(url, { signal })
+    const pollHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
+    fetch(url, { signal, headers: pollHeaders })
       .then((res) => res.ok ? res.json() : null)
-      .then((body: { messages?: Array<{ id: number; message: SignalingMessage | GossipMessage }> } | null) => {
+      .then(async (body: { messages?: Array<{ id: number; message: SignalingMessage | GossipMessage }> } | null) => {
+        // Process messages sequentially so ICE candidates are applied after setRemoteDescription.
+        // Concurrent dispatch (void promises) allowed ICE to race ahead of OFFER/ANSWER SDP.
         for (const envelope of body?.messages ?? []) {
           if (Number.isFinite(envelope.id)) after = Math.max(after, envelope.id)
-          void handleSignalingMessage(envelope.message).catch((err) => {
+          await handleSignalingMessage(envelope.message).catch((err) => {
             console.warn('[p2p] HTTP signaling message error:', err)
           })
         }
@@ -946,6 +974,8 @@ function markPeerManagerReady(): void {
     forceRelay: config.forceRelay,
     iceTransportPolicy: config.iceTransportPolicy,
     iceServerCount: config.iceServers.length,
+    apiTokenPresent: Boolean(config.apiToken),
+    apiTokenLength: config.apiToken?.length ?? 0,
   })
   ;(window as unknown as Record<string, unknown>)['__nodexLastP2PCapture'] = () => lastP2PCapture
   exposeLeadershipState()
@@ -976,17 +1006,6 @@ async function startP2PSession(): Promise<void> {
     console.warn('[p2p] failed to get nodeId from SW:', err)
     sessionStartInProgress = false
     return
-  }
-
-  // Fetch session key and post to SW for AES-GCM decryption (CRPT-02)
-  try {
-    const keyRes = await fetch('/api/session-key')
-    if (keyRes.ok) {
-      const { keyId, keyBytes } = await keyRes.json() as { keyId: string; keyBytes: string }
-      navigator.serviceWorker.controller?.postMessage({ type: 'IMPORT_SESSION_KEY', keyId, keyBytes })
-    }
-  } catch (err) {
-    console.warn('[p2p] session key fetch failed:', err)
   }
 
   const httpSignalingBase = getHttpSignalingBase()
