@@ -14,6 +14,7 @@ import {
   type NodexRuntimeConfig,
   type IceServerConfig,
 } from '../shared/config.js'
+import { captureEvidence, initConsoleErrorCapture } from './evidence-capture.js'
 import type {
   CandidatePathType,
   GossipMessage,
@@ -37,6 +38,14 @@ interface PeerConnection {
   state: 'connecting' | 'connected' | 'failed' | 'closed'
   makingOffer: boolean
   ignoreOffer: boolean
+  // Buffer for ICE candidates that arrive before setRemoteDescription is called.
+  // HTTP polling can deliver ICE candidates before OFFER/ANSWER in a separate poll cycle.
+  pendingIceCandidates: RTCIceCandidateInit[]
+  // Phase 21 timing instrumentation — epoch ms; undefined until the event fires
+  iceGatherStartAt?: number    // when icegatheringstate first changed to 'gathering'
+  iceGatherEndAt?: number      // when icegatheringstate changed to 'complete'
+  dcCreatedAt?: number         // when the DataChannels were created (before SDP negotiation)
+  dcOpenAt?: number            // when the first DataChannel raised 'open'
 }
 
 // Module-level state — exported for test introspection and _resetForTest
@@ -144,6 +153,10 @@ interface TelemetryExtractInput {
   dataChannelState: string
   timestamp: number
   stats: StatsReportLike
+  // Phase 21 timing — optional; absent when event hasn't fired yet
+  iceGatherDurationMs?: number
+  dcOpenLatencyMs?: number
+  signalingSuccess?: boolean
 }
 
 interface StoragePressureInput {
@@ -247,11 +260,22 @@ export function extractPeerTelemetryFromStats(input: TelemetryExtractInput): Pee
     ...(rttSeconds !== undefined ? { current_round_trip_time_ms: Math.round(rttSeconds * 100000) / 100 } : {}),
     ...(bytesSent !== undefined ? { bytes_sent: bytesSent } : {}),
     ...(bytesReceived !== undefined ? { bytes_received: bytesReceived } : {}),
+    ...(input.iceGatherDurationMs !== undefined ? { ice_gather_duration_ms: input.iceGatherDurationMs } : {}),
+    ...(input.dcOpenLatencyMs !== undefined ? { dc_open_latency_ms: input.dcOpenLatencyMs } : {}),
+    ...(input.signalingSuccess !== undefined ? { signaling_success: input.signalingSuccess } : {}),
     timestamp: input.timestamp,
   }
 }
 
 async function samplePeerTelemetry(conn: PeerConnection): Promise<PeerTelemetrySample> {
+  const iceGatherDurationMs = (conn.iceGatherStartAt !== undefined && conn.iceGatherEndAt !== undefined)
+    ? conn.iceGatherEndAt - conn.iceGatherStartAt
+    : undefined
+  const dcOpenLatencyMs = (conn.dcCreatedAt !== undefined && conn.dcOpenAt !== undefined)
+    ? conn.dcOpenAt - conn.dcCreatedAt
+    : undefined
+  const signalingSuccess = conn.dcOpenAt !== undefined
+
   try {
     const stats = await conn.pc.getStats()
     const sample = extractPeerTelemetryFromStats({
@@ -265,6 +289,9 @@ async function samplePeerTelemetry(conn: PeerConnection): Promise<PeerTelemetryS
       dataChannelState: conn.cacheFetch.readyState,
       timestamp: Date.now(),
       stats,
+      iceGatherDurationMs,
+      dcOpenLatencyMs,
+      signalingSuccess,
     })
     telemetrySamples.push(sample)
     return sample
@@ -281,6 +308,9 @@ async function samplePeerTelemetry(conn: PeerConnection): Promise<PeerTelemetryS
       ice_connection_state: conn.pc.iceConnectionState,
       connection_state: conn.pc.connectionState,
       data_channel_state: conn.cacheFetch.readyState,
+      ...(iceGatherDurationMs !== undefined ? { ice_gather_duration_ms: iceGatherDurationMs } : {}),
+      ...(dcOpenLatencyMs !== undefined ? { dc_open_latency_ms: dcOpenLatencyMs } : {}),
+      signaling_success: signalingSuccess,
       timestamp: Date.now(),
     }
     telemetrySamples.push(sample)
@@ -593,6 +623,8 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
     state: 'connecting',
     makingOffer: false,
     ignoreOffer: false,
+    pendingIceCandidates: [],
+    dcCreatedAt: Date.now(),
   }
   connections.set(peerId, conn)
   gossipEngine.attachChannel(peerId, gossip)
@@ -601,10 +633,26 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
     void samplePeerTelemetry(conn)
   }
 
-  gossip.addEventListener('open', recordTelemetry)
+  gossip.addEventListener('open', () => {
+    if (conn.dcOpenAt === undefined) conn.dcOpenAt = Date.now()
+    recordTelemetry()
+  })
   gossip.addEventListener('close', recordTelemetry)
-  cacheFetch.addEventListener('open', recordTelemetry)
+  cacheFetch.addEventListener('open', () => {
+    if (conn.dcOpenAt === undefined) conn.dcOpenAt = Date.now()
+    recordTelemetry()
+  })
   cacheFetch.addEventListener('close', recordTelemetry)
+
+  // ICE gather timing — track gathering start and completion for Phase 21 measurement
+  pc.addEventListener('icegatheringstatechange', () => {
+    if (pc.iceGatheringState === 'gathering' && conn.iceGatherStartAt === undefined) {
+      conn.iceGatherStartAt = Date.now()
+    } else if (pc.iceGatheringState === 'complete' && conn.iceGatherStartAt !== undefined && conn.iceGatherEndAt === undefined) {
+      conn.iceGatherEndAt = Date.now()
+    }
+    recordTelemetry()
+  })
 
   // Perfect Negotiation: offer creation
   pc.onnegotiationneeded = async () => {
@@ -848,6 +896,14 @@ async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Pr
 
     try {
       await conn.pc.setRemoteDescription(description)
+      // Drain any ICE candidates that arrived before setRemoteDescription.
+      // HTTP polling delivers candidates in separate poll cycles, so they can
+      // precede OFFER/ANSWER in a race — buffer them and apply here.
+      for (const candidate of conn.pendingIceCandidates.splice(0)) {
+        await conn.pc.addIceCandidate(candidate).catch((err) => {
+          console.warn('[p2p] drained addIceCandidate error:', err)
+        })
+      }
       if (description.type === 'offer') {
         await conn.pc.setLocalDescription()
         signalingTransport?.send(
@@ -866,11 +922,16 @@ async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Pr
     if (!sigMsg.candidate) return
     const conn = connections.get(from)
     if (!conn) return
-    try {
-      await conn.pc.addIceCandidate(sigMsg.candidate as RTCIceCandidateInit)
-    } catch (err) {
-      if (!conn.ignoreOffer) {
-        console.warn('[p2p] addIceCandidate error:', err)
+    if (!conn.pc.remoteDescription) {
+      // Buffer: OFFER has not been processed yet; apply after setRemoteDescription.
+      conn.pendingIceCandidates.push(sigMsg.candidate as RTCIceCandidateInit)
+    } else {
+      try {
+        await conn.pc.addIceCandidate(sigMsg.candidate as RTCIceCandidateInit)
+      } catch (err) {
+        if (!conn.ignoreOffer) {
+          console.warn('[p2p] addIceCandidate error:', err)
+        }
       }
     }
   }
@@ -978,6 +1039,7 @@ function markPeerManagerReady(): void {
     apiTokenLength: config.apiToken?.length ?? 0,
   })
   ;(window as unknown as Record<string, unknown>)['__nodexLastP2PCapture'] = () => lastP2PCapture
+  ;(window as unknown as Record<string, unknown>)['__nodexCaptureEvidence'] = captureEvidence
   exposeLeadershipState()
 }
 
@@ -1065,6 +1127,7 @@ async function startP2PSession(): Promise<void> {
 
 async function init(): Promise<void> {
   if (signalingTransport !== null || sessionStartInProgress) return
+  initConsoleErrorCapture()
   roomId = getRoomId()
   topologyLabel = getTopologyLabel()
   runtimeConfig = getRuntimeConfigFromPage()

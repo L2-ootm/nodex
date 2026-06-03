@@ -7,8 +7,9 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
-import { ENCRYPTION_KEY_ID } from '../shared/config.js'
-import { peers as signalingPeers } from './signaling-server.js'
+import { DEFAULT_SIGNALING_ROOM, ENCRYPTION_KEY_ID } from '../shared/config.js'
+import { buildPayloadAad } from '../crypto/crypto.js'
+import { getPeers } from './signaling-server.js'
 
 const app = new Hono()
 
@@ -16,6 +17,20 @@ const app = new Hono()
 // Opaque responses make response.headers.get('X-Nodex-Seq') return null, breaking the
 // entire freshness system.
 app.use('*', cors({ origin: ['http://localhost:4173', 'http://localhost:5173'] }))
+
+// NX-07: Beta auth gate for product endpoint.
+// Enforcement is opt-in via NODEX_BETA_ENFORCE_AUTH=true so local dev / Playwright tests are
+// unaffected by default. Set this env var in production/hosted deployments before external sharing.
+function isBetaTokenValid(token: string | undefined): boolean {
+  if (!token) return false
+  const raw = process.env['NODEX_BETA_TOKENS'] ?? ''
+  const valid = raw.split(',').map(t => t.trim()).filter(Boolean)
+  return valid.includes(token)
+}
+
+function betaAuthEnforced(): boolean {
+  return process.env['NODEX_BETA_ENFORCE_AUTH'] === 'true'
+}
 
 // In-memory sequence counter — exported for test access (per D-10 and CONTEXT.md specifics)
 export const seqCounters = new Map<string, number>()
@@ -44,7 +59,16 @@ const cryptoReady: Promise<void> = (async () => {
 // GET /api/products/:id — AES-GCM-256 encrypted product payload (CRPT-01)
 // Body: base64 ciphertext. Headers: X-Nodex-Iv (base64, 12 bytes), X-Nodex-Key-Id, X-Nodex-Seq
 // Fresh IV per call via getRandomValues — mitigates IV-reuse (T-03-03)
+// Auth: requires Authorization: Bearer <token> when NODEX_BETA_ENFORCE_AUTH=true (NX-07)
 app.get('/api/products/:id', async (c) => {
+  if (betaAuthEnforced()) {
+    const authHeader = c.req.header('Authorization') ?? ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined
+    if (!isBetaTokenValid(token)) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+  }
+
   const id = c.req.param('id')
   const path = `/api/products/${id}`
   if (!seqCounters.has(path)) {
@@ -57,7 +81,7 @@ app.get('/api/products/:id', async (c) => {
   const jsonBody = JSON.stringify({ id, name: `Product ${id}`, price: 9.99 })
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
+    { name: 'AES-GCM', iv, additionalData: buildPayloadAad(path, seq, ENCRYPTION_KEY_ID) },
     encryptionKey,
     new TextEncoder().encode(jsonBody)
   )
@@ -103,23 +127,40 @@ app.get('/api/session-key', async (c) => {
 // Body: { path: string, seq: number }. Returns { seededNodeIds: string[] }
 // PoC: unauthenticated. Production: requires authenticated invalidation channel (T-03-01)
 app.post('/api/gossip-seed', async (c) => {
-  const { path, seq } = await c.req.json() as { path: string; seq: number }
-  const peerIds = [...signalingPeers.keys()].slice(0, 2)
-  for (const peerId of peerIds) {
-    const peer = signalingPeers.get(peerId)
-    if (peer && peer.readyState === 1 /* OPEN */) {
-      peer.send(JSON.stringify({
-        type: 'GOSSIP_INVALIDATE',
-        msgId: globalThis.crypto.randomUUID(),
-        key: path,
-        seq,
-        ttl: 5,
-        originNodeId: 'server',
-        t_invalidate: Date.now(),
-      }))
+  let body: { path?: string; seq?: number; room?: string }
+  try {
+    body = await c.req.json() as { path?: string; seq?: number; room?: string }
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  const { path, seq, room } = body
+  if (!path || typeof seq !== 'number') return c.json({ error: 'path and seq required' }, 400)
+  const roomId = room ?? c.req.header('X-Nodex-Room') ?? c.req.query('room') ?? DEFAULT_SIGNALING_ROOM
+  const signalingPeers = getPeers(roomId)
+  const candidates = [...signalingPeers.entries()]
+    .filter(([, peer]) => peer.readyState === 1 /* OPEN */)
+    .slice(0, 2)
+  const seededNodeIds: string[] = []
+  const msg = JSON.stringify({
+    type: 'GOSSIP_INVALIDATE',
+    msgId: globalThis.crypto.randomUUID(),
+    key: path,
+    seq,
+    ttl: 5,
+    originNodeId: 'server',
+    t_invalidate: Date.now(),
+  })
+  for (const [peerId, peer] of candidates) {
+    try {
+      if (peer.readyState === 1 /* OPEN */) {
+        peer.send(msg)
+        seededNodeIds.push(peerId)
+      }
+    } catch (err) {
+      console.warn(`[gossip-seed] send to ${peerId} failed (connection may have closed):`, err)
     }
   }
-  return c.json({ seededNodeIds: peerIds }, 200)
+  return c.json({ seededNodeIds }, 200)
 })
 
 if (process.env['NODE_ENV'] !== 'test') {
