@@ -12,10 +12,12 @@ import {
   readAuth,
   readLogs,
   readProfile,
+  readRunEvidence,
   readSession,
   setRoomOpen,
   writeActiveRoom,
   writeProfile,
+  writeRunEvidence,
   writeSession,
 } from '../lib/storage'
 import type { BetaResult, BetaRoom, BetaSession, PresencePeer, StoredAuth, TesterProfile } from '../lib/types'
@@ -23,6 +25,13 @@ import { PageIntro, TesterLayout } from './AppShell'
 
 type RoomMode = 'solo' | 'duo' | 'group'
 type LiveNodeState = 'ready' | 'connecting' | 'waiting' | 'offline'
+type LifecycleSignal = {
+  type: string
+  at: string
+  visibilityState?: string
+  hidden?: boolean
+  persisted?: boolean
+}
 
 interface LiveNode {
   id: string
@@ -109,7 +118,7 @@ export function ProfilePage() {
         <label className="checkbox wide"><input aria-label="Consent to be credited" type="checkbox" checked={profile.consentToCredit} onChange={(e) => setProfile({ ...profile, consentToCredit: e.target.checked })} /> I consent to be credited in the Nodex contributor/test evidence ledger.</label>
         <button className="primary-button wide" type="submit">Save profile and continue</button>
       </form>
-      <p className={status.includes('required') || status.includes('already') ? 'status error' : 'status'}>{status}</p>
+      <p role="status" aria-live="polite" aria-atomic="true" className={status.includes('required') || status.includes('already') ? 'status error' : 'status'}>{status}</p>
     </TesterLayout>
   )
 }
@@ -356,10 +365,12 @@ export function RunPage() {
       addLog(message)
       setDetails((current) => [message, ...current].slice(0, 10))
     }
+    let lifecycle: ReturnType<typeof createLifecycleRecorder> | null = null
 
     try {
       const signalBase = `${betaApiBase()}/api/signal`
       const runtime = buildRuntimeUrl(roomId, mode, signalBase, auth.token)
+      lifecycle = createLifecycleRecorder()
       setRuntimeUrl(runtime)
       const runtimeWindow = await waitForRuntimeFrame(frameRef, runtime)
       setStep(1)
@@ -409,15 +420,34 @@ export function RunPage() {
       const telemetry = await collectProtocolTelemetry(runtimeWindow)
       const capture = readP2PCapture(runtimeWindow)
       const finalCounts = countMetrics(metricEvents)
+      lifecycle.record('protocol-complete')
+      lifecycle.stop()
       const evidence = {
         roomId,
         mode,
+        topologyLabel: topologyLabelForMode(mode),
         peerCount: connectedPeerCount(runtimeWindow),
         metrics: finalCounts,
+        telemetry,
         telemetryCount: telemetry.length,
         p2pCapture: capture,
         runtimeConfig: (runtimeWindow as unknown as Record<string, () => unknown>)['__nodexRuntimeConfig']?.(),
+        lifecycleSignals: lifecycle.signals,
+        deviceHints: collectDeviceHints(),
       }
+      writeRunEvidence({
+        topologyLabel: evidence.topologyLabel,
+        resultHint: finalCounts.peerFetch > 0 || evidence.peerCount > 0 || mode === 'solo' ? 'pass' : 'partial',
+        telemetry,
+        storagePressure: { localLogEvents: readLogs().length, metricEvents: metricEvents.length },
+        runtimeConfig: evidence.runtimeConfig,
+        lifecycleSignals: lifecycle.signals,
+        deviceHints: evidence.deviceHints,
+        metrics: finalCounts,
+        peerCount: evidence.peerCount,
+        p2pCapture: capture,
+        recordedAt: new Date().toISOString(),
+      })
       record(`Runtime evidence: ${evidence.peerCount} connected peer(s), ${evidence.telemetryCount} telemetry sample(s).`)
       await sendLog(auth.token, {
         participantId: session.participantId,
@@ -438,6 +468,7 @@ export function RunPage() {
       setSummary(`Protocol test failed: ${(err as Error).message}`)
       record(`Protocol test failed: ${(err as Error).message}`)
     } finally {
+      lifecycle?.stop()
       channel?.close()
       setRunning(false)
     }
@@ -454,7 +485,7 @@ export function RunPage() {
           <button className="primary-button" type="button" disabled={running} onClick={() => { void run() }}>{running ? 'Running real test...' : 'Run real protocol test'}</button>
           <button className="soft-button" type="button" disabled={step < steps.length} onClick={() => router.push('/evidence')}>Continue to evidence</button>
         </div>
-        {summary ? <p className={summary.includes('failed') || summary.includes('No peer') ? 'status error' : 'status'}>{summary}</p> : null}
+        {summary ? <p role="status" aria-live="polite" aria-atomic="true" className={summary.includes('failed') || summary.includes('No peer') ? 'status error' : 'status'}>{summary}</p> : null}
         {details.length > 0 ? (
           <div className="log-card">
             <h3>Protocol trace</h3>
@@ -469,8 +500,9 @@ export function RunPage() {
 
 export function EvidencePage() {
   const router = useRouter()
-  const [result, setResult] = useState<BetaResult>('pass')
-  const [topology, setTopology] = useState('lan-multi-machine')
+  const runEvidence = typeof window === 'undefined' ? null : readRunEvidence()
+  const [result, setResult] = useState<BetaResult>(runEvidence?.resultHint ?? 'pass')
+  const [topology, setTopology] = useState(runEvidence?.topologyLabel ?? 'same-machine-isolation')
   const [notes, setNotes] = useState('')
   const [status, setStatus] = useState('')
 
@@ -489,9 +521,11 @@ export function EvidencePage() {
         topologyLabel: topology,
         result,
         notes: notes.trim() || undefined,
-        telemetry: readLogs(),
-        storagePressure: { localLogEvents: readLogs().length },
-        runtimeConfig: { nextSuite: true },
+        telemetry: runEvidence?.telemetry?.length ? runEvidence.telemetry : readLogs(),
+        storagePressure: runEvidence?.storagePressure ?? { localLogEvents: readLogs().length },
+        runtimeConfig: { nextSuite: true, ...(isRecord(runEvidence?.runtimeConfig) ? runEvidence?.runtimeConfig : {}) },
+        lifecycleSignals: runEvidence?.lifecycleSignals ?? [],
+        deviceHints: runEvidence?.deviceHints ?? collectDeviceHints(),
       }
       const saved = await submitEvidence(session.sessionToken, payload)
       addLog('Evidence saved.', 'info', { evidenceId: saved.evidenceId })
@@ -528,7 +562,7 @@ export function EvidencePage() {
       <PageIntro eyebrow="Evidence" title="Send your result." body="Choose what happened. If unsure, choose partial and add a note." />
       <section className="evidence-grid">
         <div className="form-stack evidence-form">
-          <label>Topology<select aria-label="Topology" value={topology} onChange={(e) => setTopology(e.target.value)}><option value="lan-multi-machine">LAN / same location</option><option value="wan-nat">WAN / NAT</option><option value="turn-relay">Forced TURN relay</option><option value="mobile">Mobile browser</option></select></label>
+          <label>Topology<select aria-label="Topology" value={topology} onChange={(e) => setTopology(e.target.value)}><option value="same-machine-isolation">Same machine (isolated browsers)</option><option value="background-tab">Background tab (same machine)</option><option value="lan-multi-machine">Same LAN / same location</option><option value="same-metro-nat">Same city / metro NAT</option><option value="wan-nat">WAN / different city</option><option value="turn-relay">Forced TURN relay</option><option value="mobile-browser">Mobile browser</option><option value="geographic-long-range">Geographic long-range (GOSP-06)</option></select></label>
           <label>Result<select aria-label="Result" value={result} onChange={(e) => setResult(e.target.value as BetaResult)}><option value="pass">Pass</option><option value="partial">Partial</option><option value="fail">Fail</option><option value="not_measured">Not measured</option></select></label>
           <label>Notes<textarea aria-label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="What did you see?" /></label>
           <button className="primary-button" type="button" onClick={send}>Send evidence</button>
@@ -540,7 +574,7 @@ export function EvidencePage() {
           <button className="soft-button" type="button" onClick={downloadLogs}>Download logs</button>
         </div>
       </section>
-      <p className={status.includes('before') || status.includes('failed') ? 'status error' : 'status'}>{status}</p>
+      <p role="status" aria-live="polite" aria-atomic="true" className={status.includes('before') || status.includes('failed') ? 'status error' : 'status'}>{status}</p>
     </TesterLayout>
   )
 }
@@ -667,6 +701,7 @@ function buildRuntimeUrl(roomId: string, mode: string, signalingUrl: string, bet
   url.searchParams.set('nodexRoom', roomId)
   url.searchParams.set('nodexTopology', `beta-${mode}`)
   url.searchParams.set('nodexSignalingUrl', signalingUrl)
+  url.searchParams.set('nodexApiOrigin', betaApiBase())
   if (betaToken) url.searchParams.set('nodexBetaToken', betaToken)
   return url.toString()
 }
@@ -700,6 +735,12 @@ function countMetrics(events: Array<{ type: string }>): { swCache: number; peerF
   }
 }
 
+function topologyLabelForMode(mode: string): string {
+  if (mode === 'solo') return 'same-machine-isolation'
+  if (mode === 'duo') return 'same-machine-isolation'
+  return 'same-machine-isolation'
+}
+
 async function collectProtocolTelemetry(runtimeWindow: Window): Promise<unknown[]> {
   const fn = (runtimeWindow as unknown as Record<string, unknown>)['__nodexPeerTelemetry']
   if (typeof fn !== 'function') return []
@@ -709,6 +750,68 @@ async function collectProtocolTelemetry(runtimeWindow: Window): Promise<unknown[
 function readP2PCapture(runtimeWindow: Window): unknown {
   const fn = (runtimeWindow as unknown as Record<string, unknown>)['__nodexLastP2PCapture']
   return typeof fn === 'function' ? (fn as () => unknown)() : null
+}
+
+function createLifecycleRecorder(): { signals: LifecycleSignal[]; record: (type: string, event?: PageTransitionEvent) => void; stop: () => void } {
+  const signals: LifecycleSignal[] = []
+  const record = (type: string, event?: PageTransitionEvent) => {
+    signals.push({
+      type,
+      at: new Date().toISOString(),
+      visibilityState: typeof document === 'undefined' ? undefined : document.visibilityState,
+      hidden: typeof document === 'undefined' ? undefined : document.hidden,
+      persisted: event?.persisted,
+    })
+  }
+  const onVisibility = () => record('visibilitychange')
+  const onPageHide = (event: PageTransitionEvent) => record('pagehide', event)
+  const onPageShow = (event: PageTransitionEvent) => record('pageshow', event)
+  const onFreeze = () => record('freeze')
+  const onResume = () => record('resume')
+
+  record('run-start')
+  document.addEventListener('visibilitychange', onVisibility)
+  window.addEventListener('pagehide', onPageHide)
+  window.addEventListener('pageshow', onPageShow)
+  document.addEventListener('freeze', onFreeze)
+  document.addEventListener('resume', onResume)
+
+  return {
+    signals,
+    record,
+    stop: () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('pageshow', onPageShow)
+      document.removeEventListener('freeze', onFreeze)
+      document.removeEventListener('resume', onResume)
+    },
+  }
+}
+
+function collectDeviceHints(): Record<string, unknown> {
+  const nav = typeof navigator === 'undefined' ? undefined : navigator
+  const uaData = nav ? (nav as Navigator & { userAgentData?: { mobile?: boolean; platform?: string; brands?: unknown[] } }).userAgentData : undefined
+  const connection = nav ? (nav as Navigator & { connection?: { effectiveType?: string; downlink?: number; rtt?: number; saveData?: boolean } }).connection : undefined
+  return {
+    userAgent: nav?.userAgent,
+    platform: uaData?.platform ?? nav?.platform,
+    brands: uaData?.brands,
+    mobile: uaData?.mobile ?? (nav ? /Android|iPhone|iPad|iPod|Mobile/i.test(nav.userAgent) : undefined),
+    maxTouchPoints: nav?.maxTouchPoints,
+    viewport: typeof window === 'undefined' ? undefined : { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio },
+    standalone: typeof window === 'undefined' ? undefined : window.matchMedia?.('(display-mode: standalone)').matches,
+    connection: connection ? {
+      effectiveType: connection.effectiveType,
+      downlink: connection.downlink,
+      rtt: connection.rtt,
+      saveData: connection.saveData,
+    } : undefined,
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
 function LiveMesh({ nodes, roomLabel }: { nodes: LiveNode[]; roomLabel: string }) {
