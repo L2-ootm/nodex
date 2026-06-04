@@ -307,6 +307,11 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
   } else if (type === 'GOSSIP_INVALIDATE') {
     // Evict stale cache entry when gossip invalidation arrives (GOSP-02)
     const { key, seq } = event.data as { key: string; seq: number }
+    // CR-03: validate inputs before mutating cache state — prevents same-origin denial-of-cache
+    if (typeof key !== 'string' || key.length === 0 || !Number.isInteger(seq) || seq < 1) {
+      console.warn('[SW] GOSSIP_INVALIDATE: invalid key or seq, ignored', { key, seq })
+      return
+    }
     event.waitUntil(
       (async () => {
         updateSeq(key, seq)
@@ -349,6 +354,11 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
   } else if (type === 'IMPORT_SESSION_KEY') {
     // Import AES-GCM session key for peer payload decryption (CRPT-02)
     const { keyId, keyBytes } = event.data as { keyId: string; keyBytes: string }
+    // CR-03: validate keyId before importing — prevents same-origin key injection attack
+    if (typeof keyId !== 'string' || keyId.length === 0) {
+      console.warn('[SW] IMPORT_SESSION_KEY: invalid keyId, ignored')
+      return
+    }
     event.waitUntil(
       (async () => {
         try {
