@@ -487,6 +487,13 @@ async function handleRequest(request: Request): Promise<Response> {
       // Consistency admission gate (G3/G9): check obs_s barrier before accepting cache hit.
       // obs_s ensures monotonic reads: never serve a version older than one already observed.
       const cacheScore = scoreCache.get(key) ?? VOL_COLD_START
+      // WR-03: skip admitCandidate entirely for high-volatility keys (score >= VOL_P2P_GATE).
+      // These keys are server-only by policy; the VOL-05 gate below routes them to the server.
+      // Calling admitCandidate here would emit an 'admission-rejected' / 'class-forbidden' metric
+      // that conflates policy-driven bypasses with real consistency barrier violations.
+      if (cacheScore >= VOL_P2P_GATE) {
+        // Fall through to VOL-05 gate and server fetch — no metric emitted for policy bypass
+      } else {
       const cacheAdmit = admitCandidate({
         candidate: {
           key,
@@ -541,6 +548,7 @@ async function handleRequest(request: Request): Promise<Response> {
         console.log('[SW] cache-hit (fresh, admitted):', key, 'obs=', observedVersionMap.get(key))
         return decryptPayloadResponse(key, response, cachedSeq)
       }
+      } // end else (cacheScore < VOL_P2P_GATE)
     }
 
     // Stale: cached seq is behind the latest known seq — fall through to server fetch
