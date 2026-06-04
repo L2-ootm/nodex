@@ -491,6 +491,14 @@ async function handleRequest(request: Request): Promise<Response> {
       } else {
         // Admitted — update obs_s barrier to the version just served
         observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, cachedSeq))
+        // Best-effort IDB persistence for monotonic read barrier (IMPL-02)
+        // Sentinel pattern: __obs_v:{key} in nodex-meta store; seq = observed version
+        getDb().then(db => db.put(META_STORE, {
+          path: '__obs_v:' + key,
+          seq: observedVersionMap.get(key) ?? 0,
+          accessed_at: Date.now(),
+          byte_size: 0,
+        })).catch(() => {})
 
         // Fresh cache hit — update LRU timestamp (best-effort)
         await touchAccessedAt(key)
@@ -628,6 +636,14 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
             updateSeq(key, parsed.seq)
             // Update obs_s barrier after successful peer-fetch (monotone advance)
             observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, parsed.seq))
+            // Best-effort IDB persistence for monotonic read barrier (IMPL-02)
+            // Sentinel pattern: __obs_v:{key} in nodex-meta store; seq = observed version
+            getDb().then(db => db.put(META_STORE, {
+              path: '__obs_v:' + key,
+              seq: observedVersionMap.get(key) ?? 0,
+              accessed_at: Date.now(),
+              byte_size: 0,
+            })).catch(() => {})
             resolve(
               new Response(new TextDecoder().decode(plaintext), {
                 status: 200,
@@ -701,6 +717,14 @@ async function fetchAndCache(
   updateSeq(key, seq)
   // Update obs_s barrier after server fetch — server version is authoritative
   observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, seq))
+  // Best-effort IDB persistence for monotonic read barrier (IMPL-02)
+  // Sentinel pattern: __obs_v:{key} in nodex-meta store; seq = observed version
+  getDb().then(db => db.put(META_STORE, {
+    path: '__obs_v:' + key,
+    seq: observedVersionMap.get(key) ?? 0,
+    accessed_at: Date.now(),
+    byte_size: 0,
+  })).catch(() => {})
 
   // Emit server-fallback metric (D-14)
   const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
