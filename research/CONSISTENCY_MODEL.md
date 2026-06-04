@@ -26,6 +26,101 @@ The following terms are used precisely in the formal invariants below. Definitio
 - **Write epoch**: The server-side version counter value at the moment a write is accepted. A write carrying `baseVersion` is accepted if and only if `baseVersion >= currentVersion` at the moment the server processes it. Implemented via `seqCounters` in `src/server/mock-api.ts`.
 - **Latest known version (lkv(k))**: The most recent server-issued version of key k known to this session. Derived from gossip invalidation messages and direct server responses. Stored in the in-memory seqMap (`src/sw/freshness.ts`).
 
+## Formal Correctness Conditions
+
+The four invariants below constitute the formal consistency contract for Nodex. Each invariant is stated as a condition on admitted reads or accepted writes. Each has a corresponding implementation path in `src/shared/consistency.ts` via `admitCandidate()` and `observeVersion()`.
+
+---
+
+### Invariant 1: Session Consistency (Read Your Writes)
+
+**Statement:** For any write W on key k in session S, every subsequent read R in session S on key k must return a version ≥ version(W).
+
+**Assumptions:**
+- The session has imported the server's AES-GCM session key before any reads.
+- The write was accepted by the server (received a 200 response with `version` field).
+- The session is bounded by a single SW lifetime; a SW restart resets obs_s.
+
+**Implementation note:** `observedVersionMap.set(key, observeVersion(prev, returnedVersion))` is called after every admitted read. The `observeVersion()` function (`src/shared/consistency.ts`) returns `Math.max(previous, returned)`, ensuring obs_s(k) is monotonically non-decreasing. Any subsequent candidate with `version < obs_s(k)` is rejected by `admitCandidate()` with reason `below-session-observed`.
+
+**Worked Example:**
+- Session observes product /api/products/1 at version 3 (obs_s = 3).
+- Client writes to /api/products/1 with baseVersion=3; server accepts, returns version 4.
+- obs_s updated to 4 after write acknowledgment.
+- A peer response arrives with version 3. `admitCandidate({ candidate.version: 3, sessionObservedVersion: 4 })` → `{ admitted: false, reason: 'below-session-observed' }`. Read falls back to server.
+- Server returns version 4. `admitCandidate({ candidate.version: 4, sessionObservedVersion: 4 })` → `{ admitted: true }`. obs_s remains 4.
+
+---
+
+### Invariant 2: Monotonic Reads
+
+**Statement:** For any two reads R1, R2 in session S on the same key k, if R1 precedes R2, then version(R2) ≥ version(R1).
+
+**Assumptions:**
+- Both reads resolve through `admitCandidate()` (cache hit path or peer-fetch path in sw.ts).
+- The session has not restarted (SW has not been terminated and re-registered).
+
+**Implementation note:** obs_s(k) is updated via `observeVersion(prev, returned) = Math.max(prev, returned)` after each admitted read. The check `candidate.version < sessionObservedVersion` in `admitCandidate()` (rejection reason: `below-session-observed`) enforces that no future read admits a version lower than the current obs_s(k). IDB persistence of obs_s entries (using `__obs_v:{key}` sentinels in `nodex-meta`) ensures continuity across page reloads within the same SW lifetime.
+
+**Worked Example:**
+- R1: SW serves /api/products/2 at version 5. obs_s updated: observeVersion(0, 5) = 5.
+- R2 candidate: peer serves version 3. `admitCandidate({ version: 3, sessionObservedVersion: 5 })` → `{ admitted: false, reason: 'below-session-observed' }`. Peer candidate rejected.
+- R2 resolved from server: version 7. `admitCandidate({ version: 7, sessionObservedVersion: 5 })` → `{ admitted: true }`. obs_s updated: observeVersion(5, 7) = 7.
+- Version sequence: 5, 7 — monotonically non-decreasing. Invariant 2 satisfied.
+
+---
+
+### Invariant 3: Bounded-Staleness(K,T)
+
+**Statement:** A candidate response for key k is admitted only if all three sub-conditions hold simultaneously:
+
+1. `candidate.version ≥ lkv(k) − K`
+2. `now − candidate.updatedAt ≤ T` (in milliseconds)
+3. `candidate.version ≥ obs_s(k)`
+
+Where K = maxStaleVersions (currently 2) and T = maxStaleMs (currently 5000 ms).
+
+**Assumptions:**
+- lkv(k) is the latest version of k known to the SW session (from seqMap, fed by gossip invalidations and server responses).
+- candidate.updatedAt is a server-issued UTC timestamp in epoch milliseconds.
+- The candidate's version and updatedAt are carried in X-Nodex-Version and X-Nodex-Updated-At response headers for server-originated responses.
+- If lkv(k) is unknown (seqMap miss), lkv(k) is conservatively treated as candidate.version, making sub-condition 1 trivially satisfied. This is the cold-start case.
+
+**Implementation note:** `admitCandidate()` in `src/shared/consistency.ts` checks sub-condition 3 first (`below-session-observed`), then sub-condition 1 (`beyond-version-staleness`: `candidate.version < latestKnownVersion - maxStaleVersions`), then sub-condition 2 (`beyond-time-staleness`: `now - candidate.updatedAt > maxStaleMs`). If any check fails, the candidate is rejected and the SW falls back to the server.
+
+**Worked Example (version staleness):**
+- Key /api/products/3: lkv = 10, K = 2.
+- Peer response with version 7: 7 < 10 − 2 = 8 → `{ admitted: false, reason: 'beyond-version-staleness' }`.
+- Peer response with version 9: 9 ≥ 10 − 2 = 8 → sub-condition 1 passes. Proceed to time check.
+
+**Worked Example (time staleness):**
+- Key /api/products/4: T = 5000 ms.
+- Peer response with updatedAt = now − 6000: 6000 > 5000 → `{ admitted: false, reason: 'beyond-time-staleness' }`.
+- Peer response with updatedAt = now − 3000: 3000 ≤ 5000 → sub-condition 2 passes.
+
+---
+
+### Invariant 4: OCC Write Rejection
+
+**Statement:** A write operation W on key k carrying baseVersion B is rejected by the server if the server's current version of k (currentVersion) satisfies: `currentVersion > B`.
+
+The server accepts the write and advances the version to `currentVersion + 1` only when: `currentVersion ≤ B`.
+
+**Assumptions:**
+- The server is the sole authority for canonical version assignment (authority model: server-side writes only).
+- currentVersion is derived from the server's in-memory `seqCounters` map (initialized to 1 for unread keys).
+- The client read the key at version B before constructing the write request.
+
+**Implementation note:** `POST /api/write/:path` in `src/server/mock-api.ts` reads `seqCounters.get(path) ?? 1` as currentVersion. If `currentVersion > baseVersion`, returns HTTP 409 with body `{ error: 'conflict', currentVersion, baseVersion }`. Otherwise, calls `seqCounters.set(path, currentVersion + 1)` and returns HTTP 200 with `{ version: currentVersion + 1, path }`.
+
+**Worked Example:**
+- Server state: /api/products/5 at version 3.
+- Client A reads at version 3, constructs write with baseVersion=3. Server processes: 3 ≤ 3 → accept, version advances to 4. Response: `200 { version: 4 }`.
+- Client B (concurrent, also read at version 3) sends write with baseVersion=3. Server now at version 4: 4 > 3 → reject. Response: `409 { error: 'conflict', currentVersion: 4, baseVersion: 3 }`. Client B must re-read at version 4 before retrying.
+- This prevents the double-write race condition identified in the Prof. Paulo meeting.
+
+---
+
 ## Non-goals
 
 Nodex does not attempt to provide:
