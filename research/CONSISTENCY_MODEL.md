@@ -1,7 +1,8 @@
 ---
 title: "Nodex — Consistency Model"
-date: 2026-06-02
-status: draft-after-paulo-research
+date: 2026-06-04
+status: peer-reviewable-draft
+formalized_in: Phase 19
 source: "Research-after-meeting.txt"
 ---
 
@@ -120,6 +121,19 @@ The server accepts the write and advances the version to `currentVersion + 1` on
 - This prevents the double-write race condition identified in the Prof. Paulo meeting.
 
 ---
+
+## Implementation Traceability
+
+The table below links each formal invariant to its implementing function and source file. This traceability is required for academic review to verify that formal claims correspond to executable code.
+
+| Invariant | Implementation | Location |
+|-----------|---------------|----------|
+| Session Consistency | `admitCandidate()` — rejects `below-session-observed` | `src/shared/consistency.ts` |
+| Monotonic Reads | `observeVersion()` — returns `Math.max(prev, returned)` | `src/shared/consistency.ts` |
+| Bounded-Staleness(K,T) | `admitCandidate()` — rejects `beyond-version-staleness`, `beyond-time-staleness` | `src/shared/consistency.ts` |
+| OCC Write Rejection | `POST /api/write/:path` — 409 when `seqCounters.get(path) > baseVersion` | `src/server/mock-api.ts` |
+| Session barrier (obs_s) | `observedVersionMap: Map<string, number>` + IDB sentinels `__obs_v:{key}` | `src/sw/sw.ts` |
+| Version metadata delivery | `X-Nodex-Version`, `X-Nodex-Policy`, `X-Nodex-Max-Stale-Versions`, `X-Nodex-Max-Stale-Ms` headers | `src/server/mock-api.ts` |
 
 ## Non-goals
 
