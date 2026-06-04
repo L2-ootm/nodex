@@ -410,10 +410,19 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           }
           const iv = cached.headers.get('X-Nodex-Iv') ?? ''
           const keyId = cached.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
+          // Read server-issued updatedAt from IDB metadata (epoch ms) for time-staleness enforcement
+          let updatedAt = Date.now()
+          try {
+            const db = await getDb()
+            const meta = await db.get(META_STORE, key)
+            if (meta?.cached_at) updatedAt = meta.cached_at
+          } catch {
+            // best-effort — falls back to Date.now() which disables time-staleness on receiver
+          }
           // Re-serve the encrypted payload as-is (server stores ciphertext; SW never decrypts for peer serve)
           replyPort?.postMessage({
             found: true,
-            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq }),
+            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq, updatedAt }),
           })
         } catch (err) {
           console.warn('[SW] P2P_FETCH_SERVE error:', err)
@@ -571,12 +580,13 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
         event.data.found &&
         event.data.payload
       ) {
-        // Payload is JSON: { ciphertext: base64, iv: base64, keyId: string, seq: number }
+        // Payload is JSON: { ciphertext: base64, iv: base64, keyId: string, seq: number, updatedAt: number }
         // CRPT-04: DTLS provides transport encryption; AES-GCM provides payload confidentiality
         // at rest and in peer-to-peer transit (DataChannel content never plaintext in flight)
-        let parsed: { ciphertext: string; iv: string; keyId: string; seq: number }
+        type PeerPayload = { ciphertext: string; iv: string; keyId: string; seq: number; updatedAt: number }
+        let parsed: PeerPayload
         try {
-          parsed = JSON.parse(event.data.payload as string) as typeof parsed
+          parsed = JSON.parse(event.data.payload as string) as PeerPayload
         } catch {
           resolve(null)
           return
@@ -599,7 +609,7 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
           candidate: {
             key,
             version: parsed.seq,
-            updatedAt: Date.now(),
+            updatedAt: typeof parsed.updatedAt === 'number' && parsed.updatedAt > 0 ? parsed.updatedAt : Date.now(),
             class: 'fresh-dynamic',
           },
           policy: peerReadsPolicyFromScore(peerScore),

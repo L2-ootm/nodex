@@ -96,7 +96,7 @@ app.get('/api/products/:id', async (c) => {
     'X-Nodex-Iv': ivBase64,
     'X-Nodex-Key-Id': ENCRYPTION_KEY_ID,
     'X-Nodex-Version': String(seq),
-    'X-Nodex-Updated-At': new Date().toISOString(),
+    'X-Nodex-Updated-At': String(Date.now()),
     'X-Nodex-Policy': 'bounded-staleness',
     'X-Nodex-Max-Stale-Versions': '2',
     'X-Nodex-Max-Stale-Ms': '5000',
