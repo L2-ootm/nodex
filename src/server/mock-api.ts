@@ -7,7 +7,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
-import { createHash } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { DEFAULT_SIGNALING_ROOM, ENCRYPTION_KEY_ID } from '../shared/config.js'
 import { buildPayloadAad } from '../crypto/crypto.js'
 import { getPeers } from './signaling-server.js'
@@ -22,11 +22,17 @@ app.use('*', cors({ origin: ['http://localhost:4173', 'http://localhost:5173'] }
 // NX-07: Beta auth gate for product endpoint.
 // Enforcement is opt-in via NODEX_BETA_ENFORCE_AUTH=true so local dev / Playwright tests are
 // unaffected by default. Set this env var in production/hosted deployments before external sharing.
+// WR-02: Use constant-time comparison via timingSafeEqual to avoid timing side-channel for
+// token enumeration. Both sides are SHA-256 hashed to normalize length before comparison.
 function isBetaTokenValid(token: string | undefined): boolean {
   if (!token) return false
   const raw = process.env['NODEX_BETA_TOKENS'] ?? ''
   const valid = raw.split(',').map(t => t.trim()).filter(Boolean)
-  return valid.includes(token)
+  const tokenHash = createHash('sha256').update(token).digest()
+  return valid.some(v => {
+    const vHash = createHash('sha256').update(v).digest()
+    return timingSafeEqual(tokenHash, vHash)
+  })
 }
 
 function betaAuthEnforced(): boolean {
