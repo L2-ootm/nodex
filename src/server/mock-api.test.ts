@@ -197,11 +197,12 @@ describe('mock-api — version metadata headers (IMPL-01)', () => {
     expect(Number(version)).toBeGreaterThan(0)
   })
 
-  it('X-Nodex-Updated-At is a valid ISO 8601 string', async () => {
+  it('X-Nodex-Updated-At is epoch ms', async () => {
     const res = await app.request('/api/products/1')
     const updatedAt = res.headers.get('X-Nodex-Updated-At')
     expect(updatedAt).not.toBeNull()
-    expect(new Date(updatedAt!).toISOString()).toBe(updatedAt)
+    expect(Number.isInteger(Number(updatedAt!))).toBe(true)
+    expect(Number(updatedAt!)).toBeGreaterThan(0)
   })
 
   it('X-Nodex-Policy equals bounded-staleness', async () => {
