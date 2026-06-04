@@ -204,7 +204,7 @@ function peerReadsPolicyFromScore(score: number): ConsistencyPolicy {
   if (score >= VOL_P2P_GATE) {
     return { class: 'critical', peerReads: false }
   }
-  return { class: 'fresh-dynamic', peerReads: true, maxStaleVersions: 3 }
+  return { class: 'fresh-dynamic', peerReads: true, maxStaleVersions: 2 }
 }
 
 // ---------------------------------------------------------------------------
