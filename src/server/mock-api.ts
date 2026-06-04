@@ -118,6 +118,12 @@ app.post('/api/invalidate/:path{.+$}', (c) => {
 // POST /api/write/:path{.+$} — OCC write endpoint (IMPL-03)
 // Accepts a write if baseVersion matches current seq; rejects with 409 if stale.
 // PoC: unauthenticated — same risk posture as /api/invalidate (T-19-06)
+//
+// WR-01 ordering note: seqCounters defaults to 1 for unknown keys (write-before-read ordering).
+// If a write arrives before any GET for a key, seqCounters initializes at 1 and advances to 2.
+// The subsequent GET will read seq=2 from seqCounters (already set by the write).
+// Tests that assume version history starts at 1 (e.g. buildPayloadAad(path, 1, ...)) must issue
+// a GET before any write, or reset seqCounters in beforeEach to avoid decryption failures.
 app.post('/api/write/:path{.+$}', async (c) => {
   const path = '/' + c.req.param('path')
   let body: { baseVersion?: unknown; data?: unknown }
