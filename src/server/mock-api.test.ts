@@ -2,8 +2,9 @@
 // Unit tests for the Hono mock API server
 // Uses Hono's testClient for in-process testing (no real HTTP server)
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { app, seqCounters, sessionKeyBytes } from './mock-api.js'
+import { buildPayloadAad } from '../crypto/crypto.js'
 
 describe('mock-api', () => {
   beforeEach(() => {
@@ -143,7 +144,7 @@ describe('mock-api', () => {
     const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
 
     const plaintext = await globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
+      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, 'default') },
       cryptoKey,
       Buffer.from(ct, 'base64')
     )
@@ -151,5 +152,233 @@ describe('mock-api', () => {
     expect(json.id).toBe('42')
     expect(json.name).toBe('Product 42')
     expect(json.price).toBe(9.99)
+  })
+
+  it('Test 16: ciphertext rejects forged seq metadata through AES-GCM AAD', async () => {
+    const keyRes = await app.request('/api/session-key')
+    const { keyBytes } = await keyRes.json() as { keyId: string; keyBytes: string }
+    const cryptoKey = await globalThis.crypto.subtle.importKey(
+      'raw',
+      Buffer.from(keyBytes, 'base64'),
+      { name: 'AES-GCM' },
+      false,
+      ['decrypt']
+    )
+
+    const prodRes = await app.request('/api/products/42')
+    const ct = await prodRes.text()
+    const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
+
+    await expect(
+      globalThis.crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, 'default') },
+        cryptoKey,
+        Buffer.from(ct, 'base64')
+      )
+    ).rejects.toBeInstanceOf(DOMException)
+  })
+})
+
+describe('mock-api — version metadata headers (IMPL-01)', () => {
+  beforeEach(() => {
+    seqCounters.clear()
+  })
+
+  it('X-Nodex-Version equals X-Nodex-Seq', async () => {
+    const res = await app.request('/api/products/1')
+    expect(res.headers.get('X-Nodex-Version')).toBe(res.headers.get('X-Nodex-Seq'))
+  })
+
+  it('X-Nodex-Version is a numeric string greater than 0', async () => {
+    const res = await app.request('/api/products/1')
+    const version = res.headers.get('X-Nodex-Version')
+    expect(version).not.toBeNull()
+    expect(Number.isNaN(Number(version))).toBe(false)
+    expect(Number(version)).toBeGreaterThan(0)
+  })
+
+  it('X-Nodex-Updated-At is a valid ISO 8601 string', async () => {
+    const res = await app.request('/api/products/1')
+    const updatedAt = res.headers.get('X-Nodex-Updated-At')
+    expect(updatedAt).not.toBeNull()
+    expect(new Date(updatedAt!).toISOString()).toBe(updatedAt)
+  })
+
+  it('X-Nodex-Policy equals bounded-staleness', async () => {
+    const res = await app.request('/api/products/1')
+    expect(res.headers.get('X-Nodex-Policy')).toBe('bounded-staleness')
+  })
+
+  it('X-Nodex-Max-Stale-Versions equals 2', async () => {
+    const res = await app.request('/api/products/1')
+    expect(res.headers.get('X-Nodex-Max-Stale-Versions')).toBe('2')
+  })
+
+  it('X-Nodex-Max-Stale-Ms equals 5000', async () => {
+    const res = await app.request('/api/products/1')
+    expect(res.headers.get('X-Nodex-Max-Stale-Ms')).toBe('5000')
+  })
+
+  it('X-Nodex-Content-Hash starts with sha256: and hex part is 64 chars', async () => {
+    const res = await app.request('/api/products/1')
+    const hash = res.headers.get('X-Nodex-Content-Hash')
+    expect(hash).not.toBeNull()
+    expect(hash!.startsWith('sha256:')).toBe(true)
+    const hexPart = hash!.slice('sha256:'.length)
+    expect(hexPart).toHaveLength(64)
+    expect(hexPart).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('X-Nodex-Etag matches "v{N}" pattern', async () => {
+    const res = await app.request('/api/products/1')
+    const etag = res.headers.get('X-Nodex-Etag')
+    expect(etag).not.toBeNull()
+    expect(etag).toMatch(/^"v[0-9]+"$/)
+  })
+
+  it('existing X-Nodex-Seq header is still present (backward compat)', async () => {
+    const res = await app.request('/api/products/1')
+    const seq = res.headers.get('X-Nodex-Seq')
+    expect(seq).not.toBeNull()
+    expect(Number(seq)).toBeGreaterThan(0)
+  })
+})
+
+describe('mock-api — OCC write endpoint (IMPL-03)', () => {
+  beforeEach(() => {
+    seqCounters.clear()
+  })
+
+  it('write accepted (200) when baseVersion matches initial seq', async () => {
+    await app.request('/api/products/1')
+    const res = await app.request('/api/write/api/products/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseVersion: 1, data: {} }),
+    })
+    expect(res.status).toBe(200)
+    const body = await res.json() as { version: number; path: string }
+    expect(body.version).toBe(2)
+    expect(body.path).toBe('/api/products/1')
+  })
+
+  it('write rejected (409) when baseVersion is stale', async () => {
+    await app.request('/api/products/1')
+    await app.request('/api/invalidate/api/products/1', { method: 'POST' })
+    const res = await app.request('/api/write/api/products/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseVersion: 1, data: {} }),
+    })
+    expect(res.status).toBe(409)
+    const body = await res.json() as { error: string; currentVersion: number; baseVersion: number }
+    expect(body.error).toBe('conflict')
+    expect(body.currentVersion).toBe(2)
+    expect(body.baseVersion).toBe(1)
+  })
+
+  it('409 response body contains currentVersion and baseVersion as numbers', async () => {
+    await app.request('/api/products/1')
+    await app.request('/api/invalidate/api/products/1', { method: 'POST' })
+    const res = await app.request('/api/write/api/products/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseVersion: 1, data: {} }),
+    })
+    const body = await res.json() as { error: string; currentVersion: number; baseVersion: number }
+    expect(typeof body.currentVersion).toBe('number')
+    expect(typeof body.baseVersion).toBe('number')
+  })
+
+  it('400 on missing baseVersion', async () => {
+    const res = await app.request('/api/write/api/products/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: {} }),
+    })
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toBe('baseVersion required')
+  })
+
+  it('400 on invalid JSON body', async () => {
+    const res = await app.request('/api/write/api/products/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: 'not-json',
+    })
+    expect(res.status).toBe(400)
+    const body = await res.json() as { error: string }
+    expect(body.error).toBe('invalid json')
+  })
+
+  it('successful write advances seqCounters to 2', async () => {
+    await app.request('/api/products/1')
+    await app.request('/api/write/api/products/1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseVersion: 1, data: {} }),
+    })
+    expect(seqCounters.get('/api/products/1')).toBe(2)
+  })
+})
+
+// NX-07: Beta auth gate tests
+describe('mock-api — NX-07 auth gate', () => {
+  beforeEach(() => {
+    seqCounters.clear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('returns 200 without auth when enforcement is off (default dev behavior)', async () => {
+    vi.stubEnv('NODEX_BETA_ENFORCE_AUTH', 'false')
+    const res = await app.request('/api/products/1')
+    expect(res.status).toBe(200)
+  })
+
+  it('returns 401 when enforcement is on and no Authorization header is provided', async () => {
+    vi.stubEnv('NODEX_BETA_ENFORCE_AUTH', 'true')
+    vi.stubEnv('NODEX_BETA_TOKENS', 'valid-token-abc')
+    const res = await app.request('/api/products/1')
+    expect(res.status).toBe(401)
+    const body = await res.json() as { error: string }
+    expect(body.error).toBe('Unauthorized')
+  })
+
+  it('returns 401 when enforcement is on and token does not match', async () => {
+    vi.stubEnv('NODEX_BETA_ENFORCE_AUTH', 'true')
+    vi.stubEnv('NODEX_BETA_TOKENS', 'valid-token-abc')
+    const res = await app.request('/api/products/1', {
+      headers: { Authorization: 'Bearer wrong-token' },
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('returns 200 when enforcement is on and valid token is provided', async () => {
+    vi.stubEnv('NODEX_BETA_ENFORCE_AUTH', 'true')
+    vi.stubEnv('NODEX_BETA_TOKENS', 'valid-token-abc,another-token')
+    const res = await app.request('/api/products/1', {
+      headers: { Authorization: 'Bearer valid-token-abc' },
+    })
+    expect(res.status).toBe(200)
+  })
+
+  it('accepts any token from comma-separated NODEX_BETA_TOKENS list', async () => {
+    vi.stubEnv('NODEX_BETA_ENFORCE_AUTH', 'true')
+    vi.stubEnv('NODEX_BETA_TOKENS', 'token-a,token-b,token-c')
+    const res = await app.request('/api/products/99', {
+      headers: { Authorization: 'Bearer token-c' },
+    })
+    expect(res.status).toBe(200)
+  })
+
+  it('auth gate only applies to /api/products/:id — session-key still unauthenticated', async () => {
+    vi.stubEnv('NODEX_BETA_ENFORCE_AUTH', 'true')
+    vi.stubEnv('NODEX_BETA_TOKENS', 'valid-token-abc')
+    const res = await app.request('/api/session-key')
+    expect(res.status).toBe(200)
   })
 })
