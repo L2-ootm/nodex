@@ -35,6 +35,7 @@ import {
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { buildPayloadAad, decrypt as aesDecode } from '../crypto/crypto.js'
 import { computeScore, classifyTier, deriveTTL } from '../volatility/volatility.js'
+import { admitCandidate, observeVersion, type ConsistencyPolicy } from '../shared/consistency.js'
 
 declare const self: ServiceWorkerGlobalScope
 
@@ -191,6 +192,21 @@ async function revalidateKey(key: string): Promise<{
 // Lookup is O(1) synchronous; no IDB reads in the fetch event hot path (VOL-05)
 const scoreCache = new Map<string, number>()
 
+// In-memory observed-version barrier — obs_s(key) per formal model Def. 4.2.
+// Monotonically non-decreasing. SW session scope: persists across page reloads
+// (SW stays alive), but resets on SW restart. Sufficient for PoC session guarantee.
+const observedVersionMap = new Map<string, number>()
+
+// Map volatility score to a ConsistencyPolicy for admitCandidate().
+// score >= VOL_P2P_GATE entries are server-only (caught by VOL-05 gate before this runs).
+// For admissible keys we use fresh-dynamic with conservative version staleness budget.
+function peerReadsPolicyFromScore(score: number): ConsistencyPolicy {
+  if (score >= VOL_P2P_GATE) {
+    return { class: 'critical', peerReads: false }
+  }
+  return { class: 'fresh-dynamic', peerReads: true, maxStaleVersions: 3 }
+}
+
 // ---------------------------------------------------------------------------
 // Install — skip waiting so the new SW takes control immediately
 // ---------------------------------------------------------------------------
@@ -215,6 +231,14 @@ async function activateSW(): Promise<void> {
     const allMeta: CacheMeta[] = await db.getAll(META_STORE)
     seedSeqMap(allMeta)
     console.log(`[SW] seeded seqMap with ${allMeta.length} entries`)
+    // Seed observedVersionMap from IDB sentinel entries (__obs_v:{key} pattern)
+    // Provides monotonic read continuity across page reloads within the same SW lifetime
+    for (const entry of allMeta) {
+      if (entry.path.startsWith('__obs_v:')) {
+        const key = entry.path.slice('__obs_v:'.length)
+        observedVersionMap.set(key, entry.seq)
+      }
+    }
   } catch (err) {
     // IDB unavailable — safe to continue; seqMap stays empty (all entries treated as fresh)
     console.warn('[SW] IDB seed failed:', err)
@@ -441,27 +465,55 @@ async function handleRequest(request: Request): Promise<Response> {
     const cachedSeq = meta.seq
 
     if (isFresh(key, cachedSeq)) {
-      // Fresh cache hit — update LRU timestamp (best-effort)
-      await touchAccessedAt(key)
+      // Consistency admission gate (G3/G9): check obs_s barrier before accepting cache hit.
+      // obs_s ensures monotonic reads: never serve a version older than one already observed.
+      const cacheScore = scoreCache.get(key) ?? VOL_COLD_START
+      const cacheAdmit = admitCandidate({
+        candidate: {
+          key,
+          version: cachedSeq,
+          updatedAt: meta.cached_at ?? meta.accessed_at,
+          class: 'fresh-dynamic',
+        },
+        policy: peerReadsPolicyFromScore(cacheScore),
+        sessionObservedVersion: observedVersionMap.get(key) ?? 0,
+        latestKnownVersion: getLatestSeq(key),
+        now: Date.now(),
+      })
 
-      // Increment access_count in volatility ledger (best-effort, CR-01)
-      getDb().then(db => {
-        return db.get(VOLATILITY_STORE, key).then(existing => {
-          if (existing) {
-            const updated: VolatilityEntry = { ...existing, access_count: existing.access_count + 1 }
-            return db.put(VOLATILITY_STORE, updated).then(() => {
-              scoreCache.set(key, computeScore(updated))
-            })
-          }
-        })
-      }).catch(() => { /* best-effort — volatility ledger is non-critical */ })
+      if (!cacheAdmit.admitted) {
+        // Session barrier or policy rejected this version — fall through to server for fresh data.
+        // Emit admission-rejected metric so violations are measurable.
+        const rejLatency = Math.round((self.performance.now() - start) * 100) / 100
+        void emitMetric({ type: 'admission-rejected', key, latency_ms: rejLatency, rejection_reason: cacheAdmit.reason, rejection_source: 'cache' })
+        console.log('[SW] admission rejected (cache):', key, 'reason:', cacheAdmit.reason, 'obs=', observedVersionMap.get(key) ?? 0, 'cachedSeq=', cachedSeq)
+        // Fall through to server fetch below
+      } else {
+        // Admitted — update obs_s barrier to the version just served
+        observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, cachedSeq))
 
-      // Emit sw-cache metric (D-14)
-      const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
-      await emitMetric({ type: 'sw-cache', key, latency_ms })
+        // Fresh cache hit — update LRU timestamp (best-effort)
+        await touchAccessedAt(key)
 
-      console.log('[SW] cache-hit (fresh):', key)
-      return decryptPayloadResponse(key, response, cachedSeq)
+        // Increment access_count in volatility ledger (best-effort, CR-01)
+        getDb().then(db => {
+          return db.get(VOLATILITY_STORE, key).then(existing => {
+            if (existing) {
+              const updated: VolatilityEntry = { ...existing, access_count: existing.access_count + 1 }
+              return db.put(VOLATILITY_STORE, updated).then(() => {
+                scoreCache.set(key, computeScore(updated))
+              })
+            }
+          })
+        }).catch(() => { /* best-effort — volatility ledger is non-critical */ })
+
+        // Emit sw-cache metric (D-14)
+        const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
+        await emitMetric({ type: 'sw-cache', key, latency_ms })
+
+        console.log('[SW] cache-hit (fresh, admitted):', key, 'obs=', observedVersionMap.get(key))
+        return decryptPayloadResponse(key, response, cachedSeq)
+      }
     }
 
     // Stale: cached seq is behind the latest known seq — fall through to server fetch
@@ -532,6 +584,27 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
           resolve(null)
           return
         }
+        // Consistency admission gate (G3/G9): check obs_s barrier before accepting peer response.
+        // Runs before AES decrypt to reject stale peers cheaply (no crypto cost on rejection).
+        const peerScore = scoreCache.get(key) ?? VOL_COLD_START
+        const peerAdmit = admitCandidate({
+          candidate: {
+            key,
+            version: parsed.seq,
+            updatedAt: Date.now(),
+            class: 'fresh-dynamic',
+          },
+          policy: peerReadsPolicyFromScore(peerScore),
+          sessionObservedVersion: observedVersionMap.get(key) ?? 0,
+          latestKnownVersion: getLatestSeq(key),
+          now: Date.now(),
+        })
+        if (!peerAdmit.admitted) {
+          void emitMetric({ type: 'admission-rejected', key, latency_ms: 0, rejection_reason: peerAdmit.reason, rejection_source: 'peer' })
+          console.log('[SW] peer-fetch admission rejected:', key, 'reason:', peerAdmit.reason)
+          resolve(null)
+          return
+        }
         // aesDecode throws DOMException(OperationError) on tamper/wrong key → server fallback (CRPT-03)
         aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, parsed.seq, parsed.keyId))
           .then(async (plaintext: Uint8Array) => {
@@ -553,6 +626,8 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
               ttl_ms
             )
             updateSeq(key, parsed.seq)
+            // Update obs_s barrier after successful peer-fetch (monotone advance)
+            observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, parsed.seq))
             resolve(
               new Response(new TextDecoder().decode(plaintext), {
                 status: 200,
@@ -624,6 +699,8 @@ async function fetchAndCache(
 
   // Update in-memory seq map (self-seeding — D-09)
   updateSeq(key, seq)
+  // Update obs_s barrier after server fetch — server version is authoritative
+  observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, seq))
 
   // Emit server-fallback metric (D-14)
   const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
