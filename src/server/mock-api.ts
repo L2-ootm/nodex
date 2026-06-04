@@ -7,6 +7,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
+import { createHash } from 'node:crypto'
 import { DEFAULT_SIGNALING_ROOM, ENCRYPTION_KEY_ID } from '../shared/config.js'
 import { buildPayloadAad } from '../crypto/crypto.js'
 import { getPeers } from './signaling-server.js'
@@ -79,6 +80,7 @@ app.get('/api/products/:id', async (c) => {
   await cryptoReady
 
   const jsonBody = JSON.stringify({ id, name: `Product ${id}`, price: 9.99 })
+  const contentHash = createHash('sha256').update(jsonBody).digest('hex')
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv, additionalData: buildPayloadAad(path, seq, ENCRYPTION_KEY_ID) },
@@ -93,6 +95,13 @@ app.get('/api/products/:id', async (c) => {
     'X-Nodex-Seq': String(seq),
     'X-Nodex-Iv': ivBase64,
     'X-Nodex-Key-Id': ENCRYPTION_KEY_ID,
+    'X-Nodex-Version': String(seq),
+    'X-Nodex-Updated-At': new Date().toISOString(),
+    'X-Nodex-Policy': 'bounded-staleness',
+    'X-Nodex-Max-Stale-Versions': '2',
+    'X-Nodex-Max-Stale-Ms': '5000',
+    'X-Nodex-Content-Hash': 'sha256:' + contentHash,
+    'X-Nodex-Etag': '"v' + String(seq) + '"',
   })
 })
 
@@ -104,6 +113,26 @@ app.post('/api/invalidate/:path{.+$}', (c) => {
   const newSeq = current + 1
   seqCounters.set(path, newSeq)
   return c.json({ path, newSeq })
+})
+
+// POST /api/write/:path{.+$} — OCC write endpoint (IMPL-03)
+// Accepts a write if baseVersion matches current seq; rejects with 409 if stale.
+// PoC: unauthenticated — same risk posture as /api/invalidate (T-19-06)
+app.post('/api/write/:path{.+$}', async (c) => {
+  const path = '/' + c.req.param('path')
+  let body: { baseVersion?: unknown; data?: unknown }
+  try {
+    body = await c.req.json() as { baseVersion?: unknown; data?: unknown }
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  if (typeof body.baseVersion !== 'number') return c.json({ error: 'baseVersion required' }, 400)
+  const currentVersion = seqCounters.get(path) ?? 1
+  if (currentVersion > body.baseVersion) {
+    return c.json({ error: 'conflict', currentVersion, baseVersion: body.baseVersion }, 409)
+  }
+  seqCounters.set(path, currentVersion + 1)
+  return c.json({ version: currentVersion + 1, path }, 200)
 })
 
 // GET /api/__test__/seq/:path{.+$} — test introspection endpoint
