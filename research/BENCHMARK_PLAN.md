@@ -1,15 +1,15 @@
 ---
 title: "Nodex — Benchmark Plan"
 date: 2026-06-02
-status: draft-after-paulo-research
-source: "Research-after-meeting.txt"
+status: draft-after-external-review
+source: "curated post-review research synthesis"
 ---
 
 # Nodex — Benchmark Plan
 
 ## Purpose
 
-The benchmark must answer the question raised by Prof. Paulo:
+The benchmark must answer the question raised by external academic reviewer:
 
 > Why is Nodex better than a conventional server/CDN/edge/cache architecture?
 

@@ -32,9 +32,9 @@
 
 ## Documentation
 
-- `.planning/PROJECT.md`, `.planning/ROADMAP.md`, `.planning/REQUIREMENTS.md`, and `.planning/STATE.md` are the project planning source of truth.
-- Root reports are human-facing summaries.
-- `test-results/phase-05-metrics.json` is the source metrics artifact for academic export.
+- Root reports are human-facing summaries curated for public review.
+- Internal planning logs, raw meeting notes, private beta ledgers, and person-specific runbooks stay out of the public repository.
+- Generated runtime outputs belong in ignored folders such as `test-results/`, `beta-data/`, and `dist/` unless intentionally summarized in a public report.
 - Phase 7 reports must distinguish `pass`, `partial`, `fail`, and `not_measured` rather than implying external evidence that was not collected.
 - Beta evidence submissions should preserve lifecycle/device context when available: `lifecycleSignals` for Page Visibility/browser lifecycle events and `deviceHints` for user-agent, mobile, touch, viewport, platform, and connection hints.
 
@@ -52,4 +52,4 @@
 - Do not run the original `gsd-build/get-shit-done` repository or `get-shit-done-cc` npm package.
 - Use only the maintained `open-gsd/get-shit-done-redux` fork for future GSD workflows, after verifying npm metadata.
 - Prefer the verified pinned version `@opengsd/get-shit-done-redux@1.0.0`; use `@latest` only intentionally.
-- If trusted GSD tooling is unavailable, update `.planning/` manually and record the security bypass.
+- If trusted GSD tooling is unavailable, keep operational planning local/private and only publish curated summaries.

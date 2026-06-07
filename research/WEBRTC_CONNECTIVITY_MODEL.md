@@ -1,15 +1,15 @@
 ---
 title: "Nodex — WebRTC Connectivity Model"
 date: 2026-06-02
-status: draft-after-paulo-research
-source: "Research-after-meeting.txt"
+status: draft-after-external-review
+source: "curated post-review research synthesis"
 ---
 
 # Nodex — WebRTC Connectivity Model
 
 ## Purpose
 
-This document captures the connectivity constraints raised by Prof. Paulo and confirmed by the post-meeting research.
+This document captures the connectivity constraints raised by external academic reviewer and confirmed by the post-meeting research.
 
 The key conclusion is:
 

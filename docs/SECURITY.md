@@ -518,4 +518,4 @@ Browser Page Thread
 
 ---
 
-*This document is the primary security reference for the Nodex beta deployment. For threat model details not covered here, see `.planning/SECURITY-GSD-MIGRATION-2026-05-23.md` and the research paper draft.*
+*This document is the primary security reference for the Nodex beta deployment. Internal threat-model notes and raw planning artifacts are kept outside the public repository.*

@@ -1,15 +1,15 @@
 ---
 title: "Nodex — Selective Gossip Algorithm"
 date: 2026-06-02
-status: draft-after-paulo-research
-source: "Research-after-meeting.txt"
+status: draft-after-external-review
+source: "curated post-review research synthesis"
 ---
 
 # Nodex — Selective Gossip Algorithm
 
 ## Problem
 
-Classical epidemic dissemination tends to push broadly. Prof. Paulo identified this as a core issue: Nodex cannot send every key to every peer. It must place information near the peers that need it, while avoiding redundant traffic and preserving freshness.
+Classical epidemic dissemination tends to push broadly. external academic reviewer identified this as a core issue: Nodex cannot send every key to every peer. It must place information near the peers that need it, while avoiding redundant traffic and preserving freshness.
 
 ## Design principle
 

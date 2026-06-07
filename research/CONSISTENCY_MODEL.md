@@ -3,14 +3,14 @@ title: "Nodex — Consistency Model"
 date: 2026-06-04
 status: peer-reviewable-draft
 formalized_in: Phase 19
-source: "Research-after-meeting.txt"
+source: "curated post-review research synthesis"
 ---
 
 # Nodex — Consistency Model
 
 ## Purpose
 
-This document defines the consistency model Nodex should pursue after the Prof. Paulo meeting and the follow-up research sprint.
+This document defines the consistency model Nodex should pursue after the external academic reviewer meeting and the follow-up research sprint.
 
 Nodex must not promise universal strong consistency. The correct model is a **policy-based consistency stack** where each data class declares what freshness and conflict behavior it can tolerate.
 
@@ -118,7 +118,7 @@ The server accepts the write and advances the version to `currentVersion + 1` on
 - Server state: /api/products/5 at version 3.
 - Client A reads at version 3, constructs write with baseVersion=3. Server processes: 3 ≤ 3 → accept, version advances to 4. Response: `200 { version: 4 }`.
 - Client B (concurrent, also read at version 3) sends write with baseVersion=3. Server now at version 4: 4 > 3 → reject. Response: `409 { error: 'conflict', currentVersion: 4, baseVersion: 3 }`. Client B must re-read at version 4 before retrying.
-- This prevents the double-write race condition identified in the Prof. Paulo meeting.
+- This prevents the double-write race condition identified in the external academic reviewer meeting.
 
 ---
 
@@ -266,7 +266,7 @@ Server behavior:
 - reject if current version has advanced and operation is no longer safe;
 - return conflict metadata to client.
 
-This directly addresses the race condition raised by Prof. Paulo.
+This directly addresses the race condition raised by external academic reviewer.
 
 ## Metadata model
 

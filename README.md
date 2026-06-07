@@ -61,23 +61,17 @@ Use `@latest` only when intentionally accepting the newest redux release.
 
 ## Key Artifacts
 
-- `NODEX_RESEARCH_RIGOR_STANDARD.md` — top-tier research rigor standard for paper-track development, evaluation, claims, collaboration, and real P2P evidence.
+- `NODEX_RESEARCH_RIGOR_STANDARD.md` — research rigor standard for paper-track development, evaluation, claims, collaboration, and real P2P evidence.
 - `Nodex_Technical_Report.md` — main research report.
-- `Nodex_Phase6_Complete_Technical_Report.md` — final phase report.
-- `Nodex_Phase7_Planning_Report.md` — external-validity planning report.
-- `Nodex_Phase7_External_Validation_Report.md` — Phase 7 execution report.
+- `Nodex_Phase3_Complete_Technical_Report.md` — gossip/P2P/cache/encryption phase report.
+- `Nodex_Phase4_Complete_Technical_Report.md` — volatility heuristic phase report.
+- `Nodex_Phase5_Complete_Technical_Report.md` — 10-node metrics harness report.
+- `Nodex_Phase6_Complete_Technical_Report.md` — integration hardening/demo report.
+- `Nodex_Phase7_External_Validation_Report.md` — external-validity execution report.
 - `Nodex_Multi_Machine_Test_Plan.md` — physical LAN/WAN/TURN/geographic validation plan.
-- `Nodex_Beta_Testing_Guide.md` — invite-token beta testing workflow.
-- `Nodex_Arturo_Real_Test_Protocol_2026-06-01.md` — Davi + Arturo real two-device test matrix, URLs, evidence rules, and post-call reporting requirements.
-- `Nodex_Deployed_Beta_P2P_Validation_Report.md` — 2026-05-27 hosted real-node P2P validation report.
-- `BETA_CONTRIBUTOR_LEDGER.md` — contributor/evidence ledger handling notes.
-- `test-results/phase-05-metrics.json` — source metrics from the latest full run.
-- `test-results/nodex-metrics-summary.json` and `.csv` — academic export.
-- `test-results/phase-07-external-validation.json` and `.csv` — Phase 7 claim-gated external-validity report.
-- `.planning/ROADMAP.md`, `.planning/STATE.md`, `.planning/REQUIREMENTS.md` — planning project state.
-- `.planning/SECURITY-GSD-MIGRATION-2026-05-23.md` — GSD supply-chain incident response and migration note.
-- `.planning/phases/07-external-validity-validation/` — Phase 7 research, spec, plans, validation strategy, and plan review.
-- `.planning/phases/11-next-beta-suite/11-PLAN.md` — planned Next.js migration for the beta tester/admin suite.
+- `research/` — formalization, benchmark, connectivity, consistency, and state-of-the-art research notes curated for public review.
+
+Internal planning logs, private beta ledgers, person-specific test runbooks, meeting transcripts, and raw operational artifacts are intentionally excluded from the public repository.
 
 ## Architecture
 
@@ -101,7 +95,7 @@ The PoC validates the local foreground loopback architecture, and the hosted bet
 
 Use the root app `/` with `npm run beta:stack` locally, or the hosted Next beta suite at `https://nodex-beta.vercel.app/`, for controlled internal/debug runs while Phases 13-16 are active. Do not invite broad external beta contributors until the greenlight checklist passes. Hosted backend is `https://nodex-beta-api.vercel.app/api/beta/*`. The technical metrics dashboard remains available at `/metrics.html`; in production, the beta `/run` route loads that real runtime in an iframe with `nodexSignalingUrl=https://nodex-beta-api.vercel.app/api/signal`. The Next beta `/run` route persists protocol telemetry plus Page Visibility/lifecycle events and user-agent/device hints, and `/evidence` submits them under background-tab, mobile-browser, LAN, WAN/NAT, or TURN topology labels. The beta coordinator stores local participant/evidence/run/simulation/log JSONL under `beta-data/` during local dev and uses Vercel Blob private storage in production. The ledger is for attribution and attorney review; it is not a legal inventorship determination.
 
-Phase 11 added a dedicated Next.js app under `apps/beta-suite`, keeping the research PoC intact while giving testers/admins real routes, cleaner role separation, and a more polished guided-test workflow. Phase 12 then added room-scoped live room rigor and the 2026-05-27 deployed real-protocol validation path. Planning artifacts live in `.planning/phases/11-next-beta-suite/` and `.planning/phases/12-hybrid-live-room-ultradesign/`.
+Phase 11 added a dedicated Next.js app under `apps/beta-suite`, keeping the research PoC intact while giving testers/admins real routes, cleaner role separation, and a more polished guided-test workflow. Phase 12 then added room-scoped live room rigor and the 2026-05-27 deployed real-protocol validation path. Internal phase-planning artifacts are not part of the public repository.
 
 Local Next beta suite:
 

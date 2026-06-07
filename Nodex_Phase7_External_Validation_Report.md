@@ -53,6 +53,6 @@ Unsafe until manual evidence exists:
 
 ## Next Evidence To Collect
 
-Use `.planning/phases/07-external-validity-validation/07-MANUAL-EXTERNAL-PROTOCOL.md` to collect LAN, WAN/NAT, TURN, background, mobile, and geographic evidence. For background and mobile categories, prefer the Next beta `/run` -> `/evidence` path because it attaches lifecycle and device-hint fields automatically.
+Use the public multi-machine test plan to collect LAN, WAN/NAT, TURN, background, mobile, and geographic evidence. For background and mobile categories, prefer the Next beta `/run` -> `/evidence` path because it attaches lifecycle and device-hint fields automatically.
 
 Use `Nodex_Multi_Machine_Test_Plan.md` for the concrete two-machine setup. Two computers in the same city are valid for LAN and same-metro WAN/NAT evidence, but not for geographic long-range / GOSP-06.
