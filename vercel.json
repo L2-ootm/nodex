@@ -1,0 +1,5 @@
+{
+  "buildCommand": "npm run beta:next:build",
+  "outputDirectory": "apps/beta-suite/.next",
+  "framework": "nextjs"
+}

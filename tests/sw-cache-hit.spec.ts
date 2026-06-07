@@ -5,7 +5,7 @@ import { test, expect } from '@playwright/test'
 
 test.describe('SW-02: cache hit', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
     // Clear cache state for isolation
     await page.evaluate(() => caches.delete('nodex-v1'))

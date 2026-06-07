@@ -7,7 +7,7 @@ import { injectMetricsCapture, getCapturedMetrics, waitForMetricsEvent } from '.
 
 test.describe('METR-01 + METR-02: MetricsEvent schema and hit rate', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
     await page.evaluate(() => caches.delete('nodex-v1'))
     await page.waitForTimeout(200)

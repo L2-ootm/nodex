@@ -10,7 +10,7 @@ import { injectMetricsCapture, waitForMetricsEvent } from './helpers/metrics-cap
 
 test.describe('SW-06: server fallback on cache miss', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
     // Clear cache to ensure a cold miss
     await page.evaluate(() => caches.delete('nodex-v1'))

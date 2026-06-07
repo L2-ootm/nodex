@@ -6,7 +6,7 @@ import { test, expect } from '@playwright/test'
 
 test.describe('SW-04: lifecycle — skipWaiting + clients.claim', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
   })
 

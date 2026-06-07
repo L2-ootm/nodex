@@ -1,6 +1,6 @@
 // src/sw/cache.test.ts — Unit tests for evictIfNeeded (pure function, no browser APIs)
 import { describe, it, expect } from 'vitest'
-import { evictIfNeeded } from './cache.js'
+import { evictIfNeeded, isStorageQuotaPressure } from './cache.js'
 import { CACHE_MAX_BYTES } from '../shared/config.js'
 import type { CacheMeta } from '../shared/types.js'
 
@@ -43,5 +43,19 @@ describe('evictIfNeeded', () => {
     const result = evictIfNeeded(existing, 1)
     // Should return one of them (stable sort preserves insertion order → first one)
     expect(result).toBe('/api/products/alpha')
+  })
+})
+
+describe('isStorageQuotaPressure', () => {
+  it('recognizes browser quota-style storage failures', () => {
+    expect(isStorageQuotaPressure({ name: 'QuotaExceededError' })).toBe(true)
+    expect(isStorageQuotaPressure({ name: 'NS_ERROR_DOM_QUOTA_REACHED' })).toBe(true)
+    expect(isStorageQuotaPressure({ code: 22 })).toBe(true)
+    expect(isStorageQuotaPressure(new Error('The quota has been exceeded'))).toBe(true)
+  })
+
+  it('does not classify unrelated storage errors as quota pressure', () => {
+    expect(isStorageQuotaPressure(new Error('IndexedDB connection closed'))).toBe(false)
+    expect(isStorageQuotaPressure({ name: 'AbortError' })).toBe(false)
   })
 })

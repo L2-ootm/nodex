@@ -7,7 +7,7 @@ import { injectMetricsCapture, waitForMetricsEvent } from './helpers/metrics-cap
 
 test.describe('METR-06: baseline latency comparison', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
     await page.evaluate(() => caches.delete('nodex-v1'))
     await page.waitForTimeout(200)

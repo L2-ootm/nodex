@@ -11,7 +11,7 @@ import { injectMetricsCapture, waitForMetricsEvent } from './helpers/metrics-cap
 
 test.describe('SW-07: self-seed after server fallback', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
     // Clear cache to ensure cold start
     await page.evaluate(() => caches.delete('nodex-v1'))

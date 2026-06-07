@@ -6,7 +6,7 @@ import type { DBSchema } from 'idb'
 
 export interface MetricsEvent {
   schema_version: 1
-  type: 'sw-cache' | 'peer-fetch' | 'server-fallback' | 'gossip-propagation'
+  type: 'sw-cache' | 'peer-fetch' | 'server-fallback' | 'gossip-propagation' | 'admission-rejected'
   key: string              // cache path key (e.g., '/api/products/42')
   latency_ms: number       // self.performance.now() delta, rounded to 2dp
   source_node_id: string   // UUID, 'local' alias for Phase 1
@@ -16,6 +16,48 @@ export interface MetricsEvent {
   t_invalidate?: number    // epoch ms when invalidation was first created
   t_received?: number      // epoch ms when this node received the gossip message
   hop_count?: number       // number of hops from origin (GOSSIP_TTL - msg.ttl)
+  // Consistency admission gate — populated when type='admission-rejected'
+  rejection_reason?: string  // AdmissionRejectReason from consistency.ts
+  rejection_source?: 'cache' | 'peer'  // which read path triggered the rejection
+}
+
+export type CandidatePathType = 'host' | 'srflx' | 'relay' | 'unknown'
+export type PeerRole = 'local' | 'long-range'
+
+export interface PeerTelemetrySample {
+  schema_version: 1
+  type: 'webrtc-edge'
+  room_id: string
+  topology_label: string
+  node_id: string
+  peer_id: string
+  role: PeerRole
+  selected_candidate_type: CandidatePathType
+  local_candidate_type?: CandidatePathType
+  remote_candidate_type?: CandidatePathType
+  ice_connection_state: string
+  connection_state: string
+  data_channel_state: string
+  current_round_trip_time_ms?: number
+  bytes_sent?: number
+  bytes_received?: number
+  timestamp: number
+  // Phase 7 / Phase 21 timing fields — all durations in ms
+  ice_gather_duration_ms?: number   // time from ICE gathering start to complete
+  dc_open_latency_ms?: number       // time from DataChannel creation to first open event
+  signaling_success?: boolean       // true when at least one DataChannel opened
+}
+
+export interface StoragePressureSample {
+  schema_version: 1
+  type: 'storage-pressure'
+  room_id: string
+  topology_label: string
+  node_id: string
+  usage_bytes: number | null
+  quota_bytes: number | null
+  usage_ratio: number | null
+  timestamp: number
 }
 
 export interface CacheMeta {
@@ -51,7 +93,7 @@ export interface NodexSchema extends DBSchema {
 }
 
 // Phase 2 — Signaling + WebRTC message type contracts
-export type SignalingMsgType = 'JOIN' | 'JOIN_ACK' | 'PEERS_LIST' | 'OFFER' | 'ANSWER' | 'ICE_CANDIDATE' | 'LEAVE'
+export type SignalingMsgType = 'JOIN' | 'JOIN_ACK' | 'PEERS_LIST' | 'OFFER' | 'ANSWER' | 'ICE_CANDIDATE' | 'LEAVE' | 'BROADCAST'
 
 export interface SignalingMessage {
   type: SignalingMsgType
@@ -61,6 +103,8 @@ export interface SignalingMessage {
   candidate?: { candidate: string; sdpMid?: string; sdpMLineIndex?: number }
   peers?: string[]
   polite?: boolean
+  key?: string
+  seq?: number
 }
 
 export type SwMessageType =
@@ -72,6 +116,9 @@ export type SwMessageType =
   | 'FLUSH_BUFFER'
   | 'GOSSIP_INVALIDATE'
   | 'IMPORT_SESSION_KEY'
+  | 'REVALIDATE_KEY'
+  | 'GET_CACHE_STATE'
+  | 'SET_RUNTIME_FLAGS'
 
 export interface SwMessage {
   type: SwMessageType
@@ -87,6 +134,10 @@ export interface SwMessage {
   t_invalidate?: number
   keyId?: string
   keyBytes?: ArrayBuffer | Uint8Array
+  flags?: {
+    disableP2P?: boolean
+    disableCacheRead?: boolean
+  }
 }
 
 // Phase 3 — Gossip invalidation message propagated over RTCDataChannel (gossip channel)

@@ -15,7 +15,7 @@ test.describe('SW-05: freshness — seq-based staleness detection', () => {
   test.beforeEach(async ({ page }) => {
     // Generate a unique product ID per test run based on timestamp + random
     productId = `sw05-${Date.now()}-${Math.floor(Math.random() * 10000)}`
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
     await page.evaluate(() => caches.delete('nodex-v1'))
     await page.waitForTimeout(200)

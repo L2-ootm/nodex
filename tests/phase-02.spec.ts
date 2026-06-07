@@ -11,7 +11,7 @@ async function createContext(browser: Browser): Promise<BrowserContext> {
 
 async function openAndWait(ctx: BrowserContext): Promise<ReturnType<BrowserContext['newPage']>> {
   const page = await ctx.newPage()
-  await page.goto('http://localhost:4173')
+  await page.goto('http://localhost:4173/metrics.html')
   // Wait for Service Worker to control the page
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null, { timeout: 15000 })
   return page
@@ -245,12 +245,12 @@ test.describe('200ms', () => {
           const channel = new MessageChannel()
           const start = performance.now()
 
-          channel.port2.onmessage = (_event) => {
+          channel.port1.onmessage = (_event) => {
             const elapsed = performance.now() - start
             resolve(elapsed)
           }
 
-          // Send a synthetic P2P_FETCH through the channel to measure round-trip
+          // Transfer port2 to the SW; the page must listen on port1 for the reply.
           sw.postMessage({ type: 'GET_NODE_ID' }, [channel.port2])
         })
       })

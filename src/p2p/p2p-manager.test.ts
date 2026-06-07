@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import type { PeerFetchResponse } from '../shared/types.js'
 import {
   _resetForTest,
+  buildStoragePressureSample,
+  candidateTypeFromPair,
+  extractPeerTelemetryFromStats,
   pendingRequests,
   selectConnectedPeer,
 } from './p2p-manager.js'
@@ -57,5 +60,83 @@ describe('p2p-manager', () => {
 
   it('peer selection returns null when no connections exist', () => {
     expect(selectConnectedPeer()).toBeNull()
+  })
+
+  it('classifies selected candidate type conservatively', () => {
+    expect(candidateTypeFromPair('host', 'host')).toBe('host')
+    expect(candidateTypeFromPair('host', 'srflx')).toBe('srflx')
+    expect(candidateTypeFromPair('prflx', 'host')).toBe('srflx')
+    expect(candidateTypeFromPair('relay', 'host')).toBe('relay')
+    expect(candidateTypeFromPair(undefined, 'host')).toBe('unknown')
+    expect(candidateTypeFromPair('bogus', 'host')).toBe('unknown')
+  })
+
+  it('extracts edge telemetry from a selected WebRTC candidate pair stats report', () => {
+    const report = new Map<string, Record<string, unknown>>([
+      ['transport-1', { id: 'transport-1', type: 'transport', selectedCandidatePairId: 'pair-1' }],
+      ['pair-1', {
+        id: 'pair-1',
+        type: 'candidate-pair',
+        state: 'succeeded',
+        localCandidateId: 'local-1',
+        remoteCandidateId: 'remote-1',
+        currentRoundTripTime: 0.012,
+        bytesSent: 1024,
+        bytesReceived: 2048,
+      }],
+      ['local-1', { id: 'local-1', type: 'local-candidate', candidateType: 'host' }],
+      ['remote-1', { id: 'remote-1', type: 'remote-candidate', candidateType: 'srflx' }],
+    ])
+
+    const sample = extractPeerTelemetryFromStats({
+      roomId: 'room-a',
+      nodeId: 'node-a',
+      peerId: 'node-b',
+      role: 'local',
+      connectionState: 'connected',
+      iceConnectionState: 'connected',
+      dataChannelState: 'open',
+      timestamp: 1234,
+      stats: report,
+    })
+
+    expect(sample).toMatchObject({
+      room_id: 'room-a',
+      node_id: 'node-a',
+      peer_id: 'node-b',
+      selected_candidate_type: 'srflx',
+      local_candidate_type: 'host',
+      remote_candidate_type: 'srflx',
+      current_round_trip_time_ms: 12,
+      bytes_sent: 1024,
+      bytes_received: 2048,
+    })
+  })
+
+  it('builds storage pressure samples with a bounded usage ratio', () => {
+    expect(buildStoragePressureSample({
+      roomId: 'room-a',
+      topologyLabel: 'loopback',
+      nodeId: 'node-a',
+      usage: 25,
+      quota: 100,
+      timestamp: 1234,
+    })).toMatchObject({
+      room_id: 'room-a',
+      topology_label: 'loopback',
+      node_id: 'node-a',
+      usage_bytes: 25,
+      quota_bytes: 100,
+      usage_ratio: 0.25,
+    })
+
+    expect(buildStoragePressureSample({
+      roomId: 'room-a',
+      topologyLabel: 'loopback',
+      nodeId: 'node-a',
+      usage: 50,
+      quota: 0,
+      timestamp: 1234,
+    }).usage_ratio).toBeNull()
   })
 })

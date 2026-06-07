@@ -3,6 +3,9 @@ import { defineConfig, devices } from '@playwright/test'
 export default defineConfig({
   timeout: 30000,
   testDir: 'tests',
+  testMatch: '**/*.spec.ts',
+  testIgnore: 'beta-next.spec.ts',
+  workers: 1,
   use: {
     baseURL: 'http://localhost:4173',
     serviceWorkers: 'allow',

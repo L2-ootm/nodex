@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Nodex Metrics</title>
-  <script type="module" crossorigin src="/assets/metrics-CJdF_OgG.js"></script>
-  <link rel="modulepreload" crossorigin href="/assets/p2p-manager-BDJiuEMk.js">
+  <script type="module" crossorigin src="/assets/metrics-CMHKN9AO.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/p2p-manager-CzvezqoQ.js">
   <link rel="stylesheet" crossorigin href="/assets/metrics-CBy_WeCU.css">
 <link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
 <body>
@@ -26,6 +26,24 @@
     <div class="sw-banner" id="sw-banner" hidden>
       Service Worker not registered. Ensure sw.js is served from the page origin.
     </div>
+
+    <!-- Evidence Export (two-device P2P validation) -->
+    <section class="section-panel evidence-panel">
+      <div class="section-panel__header">
+        <h2>Evidence Export</h2>
+      </div>
+      <div class="section-panel__body">
+        <p style="margin:0 0 0.5rem;font-size:0.875rem;color:var(--text-secondary,#aaa)">
+          Download a research-grade JSON artifact for this session. Run on both Device A and Device B after the P2P test completes.
+        </p>
+        <div class="form-row">
+          <button type="button" class="btn btn--primary" id="download-evidence-btn">
+            Download Evidence JSON
+          </button>
+          <span class="form-feedback" id="download-evidence-status"></span>
+        </div>
+      </div>
+    </section>
 
     <!-- Hit Rate Summary -->
     <div class="stat-cards">

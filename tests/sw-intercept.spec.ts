@@ -10,7 +10,7 @@ async function waitForSW(page: Parameters<typeof test>[1] extends ({ page }: { p
 
 test.describe('SW-01: fetch interception', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/metrics.html')
     await waitForSW(page)
   })
 

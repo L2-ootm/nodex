@@ -91,6 +91,8 @@ export async function emitMetric(partial: {
   type: MetricsEvent['type']
   key: string
   latency_ms: number
+  rejection_reason?: string
+  rejection_source?: 'cache' | 'peer'
 }): Promise<void> {
   const event: MetricsEvent = {
     schema_version: 1,
@@ -99,6 +101,8 @@ export async function emitMetric(partial: {
     latency_ms: partial.latency_ms,
     source_node_id: await getNodeId(),
     timestamp: Date.now(),
+    ...(partial.rejection_reason ? { rejection_reason: partial.rejection_reason } : {}),
+    ...(partial.rejection_source ? { rejection_source: partial.rejection_source } : {}),
   }
 
   // Emit on BroadcastChannel (D-14)

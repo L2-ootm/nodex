@@ -56,6 +56,20 @@ export function evictIfNeeded(allMeta: CacheMeta[], newByteSize: number): string
   return sorted.length > 0 ? sorted[0].path : null
 }
 
+export function isStorageQuotaPressure(err: unknown): boolean {
+  const record = err as { name?: unknown; code?: unknown; message?: unknown }
+  const name = typeof record?.name === 'string' ? record.name : ''
+  const code = typeof record?.code === 'number' ? record.code : undefined
+  const message = typeof record?.message === 'string' ? record.message.toLowerCase() : ''
+
+  return (
+    name === 'QuotaExceededError' ||
+    name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    code === 22 ||
+    message.includes('quota')
+  )
+}
+
 // ---------------------------------------------------------------------------
 // getCachedEntry — read a matched entry from Cache Storage + IDB meta
 // ---------------------------------------------------------------------------
@@ -179,7 +193,7 @@ export async function putCachedEntry(
     const cache = await self.caches.open(CACHE_NAME)
     await cache.put(key, response.clone())
   } catch (err) {
-    console.warn('[cache] Cache put failed:', err)
+    console.warn(isStorageQuotaPressure(err) ? '[cache] Cache put skipped due to quota pressure:' : '[cache] Cache put failed:', err)
     // Return even if caching fails — caller already has the original response
     return
   }
@@ -198,7 +212,7 @@ export async function putCachedEntry(
     await db.put(META_STORE, meta)
   } catch (err) {
     // QuotaExceededError or other IDB failure — log, do not propagate (T-02-03)
-    console.warn('[cache] IDB meta write failed (QuotaExceededError?):', err)
+    console.warn(isStorageQuotaPressure(err) ? '[cache] IDB meta write skipped due to quota pressure:' : '[cache] IDB meta write failed:', err)
   }
 }
 

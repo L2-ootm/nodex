@@ -4,7 +4,7 @@
 // Each test generates its own key bytes to avoid shared state.
 
 import { describe, it, expect } from 'vitest'
-import { importKey, encrypt, decrypt } from './crypto.js'
+import { buildPayloadAad, importKey, encrypt, decrypt } from './crypto.js'
 
 // Helper: generate a random 32-byte key for each test
 function randomKeyBytes(): Uint8Array {
@@ -43,6 +43,16 @@ describe('encrypt / decrypt round-trip', () => {
     const recovered = await decrypt(ciphertext, iv, key)
 
     expect(decode(recovered)).toBe('Hello, Nodex P2P cache!')
+  })
+
+  it('decrypt rejects when authenticated metadata changes', async () => {
+    const key = await importKey(randomKeyBytes())
+    const plaintext = encode('freshness-bound')
+    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default'))
+
+    await expect(
+      decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 2, 'default'))
+    ).rejects.toBeInstanceOf(DOMException)
   })
 
   it('two encrypt calls with the same key and plaintext produce different IVs (IV freshness — T-03-04)', async () => {

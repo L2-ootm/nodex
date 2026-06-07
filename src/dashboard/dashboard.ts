@@ -8,8 +8,13 @@
 //   T-03-04: event log capped at 50 rows (oldest removed from DOM)
 
 import type { MetricsEvent } from '../shared/types.js'
-import { METRICS_CHANNEL_NAME } from '../shared/config.js'
+import { METRICS_CHANNEL_NAME, DEFAULT_API_ORIGIN } from '../shared/config.js'
 import { peerManager } from '../p2p/p2p-manager.js'
+
+// Build-time API origin — injected by Vite from VITE_NODEX_BETA_API_URL; falls back to local dev default
+const DASHBOARD_API_ORIGIN: string =
+  (import.meta as { env?: Record<string, string> }).env?.['VITE_NODEX_BETA_API_URL']?.replace(/\/$/, '') ??
+  DEFAULT_API_ORIGIN
 
 // ---------------------------------------------------------------------------
 // Pure exported functions (no DOM, no BroadcastChannel — testable under vitest)
@@ -92,6 +97,10 @@ export class LatencyAccumulator {
     }
   }
 
+  getSamples(): Map<string, number[]> {
+    return this.samples
+  }
+
   private percentile(sorted: number[], p: number): number {
     if (sorted.length === 0) return 0
     const idx = Math.ceil((p / 100) * sorted.length) - 1
@@ -109,10 +118,17 @@ if (typeof document !== 'undefined') {
   let swCacheCount = 0
   let serverFallbackCount = 0
 
+  // Collected metrics events — exposed for evidence-capture
+  const collectedMetricsEvents: import('../shared/types.js').MetricsEvent[] = []
+  if (typeof window !== 'undefined') {
+    ;(window as unknown as Record<string, unknown>)['__nodexCollectedMetricsEvents'] = () => [...collectedMetricsEvents]
+  }
+
   // LatencyAccumulator instance — exposed on window for Playwright METR-04 test
   const accumulator = new LatencyAccumulator()
   if (typeof window !== 'undefined') {
     ;(window as unknown as Record<string, unknown>)['__latencyAccumulator'] = accumulator
+    ;(window as unknown as Record<string, unknown>)['__latencySamples'] = () => accumulator.getSamples()
   }
 
   // Volatility score cache — exposed on window for Playwright VOL tests (VOL-02, VOL-04, VOL-05)
@@ -161,7 +177,11 @@ if (typeof document !== 'undefined') {
         }
         await peerManager.init()
         // Fetch session key and post to SW for AES-GCM decryption (CRPT-02, idempotent)
-        fetch('/api/session-key')
+        const _sessionKeyToken = new URLSearchParams(window.location.search).get('nodexBetaToken') ?? ''
+        const _sessionKeyHeaders: Record<string, string> = _sessionKeyToken
+          ? { Authorization: `Bearer ${_sessionKeyToken}` }
+          : {}
+        fetch('/api/session-key', { headers: _sessionKeyHeaders })
           .then((r) => r.json())
           .then((data) => {
             const { keyId, keyBytes } = data as { keyId: string; keyBytes: string }
@@ -404,6 +424,11 @@ if (typeof document !== 'undefined') {
   // ---------------------------------------------------------------------------
 
   function handleMetricsEvent(event: MetricsEvent): void {
+    // Accumulate all events for evidence export (capped at 500 to bound memory)
+    if (collectedMetricsEvents.length < 500) {
+      collectedMetricsEvents.push(event)
+    }
+
     // Gossip-propagation events go to the gossip panel only (not the main event log)
     if (event.type === 'gossip-propagation') {
       renderGossipRow(event)
@@ -523,6 +548,54 @@ if (typeof document !== 'undefined') {
   }
 
   // ---------------------------------------------------------------------------
+  // Evidence Download button
+  // ---------------------------------------------------------------------------
+
+  const downloadEvidenceBtn = document.getElementById('download-evidence-btn') as HTMLButtonElement | null
+  const downloadEvidenceStatus = document.getElementById('download-evidence-status') as HTMLSpanElement | null
+
+  if (downloadEvidenceBtn) {
+    downloadEvidenceBtn.addEventListener('click', () => {
+      const captureEvidence = (window as unknown as Record<string, unknown>)['__nodexCaptureEvidence']
+      if (typeof captureEvidence !== 'function') {
+        if (downloadEvidenceStatus) {
+          downloadEvidenceStatus.textContent = 'Not ready. P2P manager has not initialized.'
+        }
+        return
+      }
+      if (downloadEvidenceStatus) {
+        downloadEvidenceStatus.textContent = 'Capturing evidence...'
+      }
+      downloadEvidenceBtn.disabled = true
+      ;(captureEvidence as () => Promise<unknown>)()
+        .then((artifact) => {
+          const json = JSON.stringify(artifact, null, 2)
+          const blob = new Blob([json], { type: 'application/json' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+          a.href = url
+          a.download = `nodex-p2p-evidence-${ts}.json`
+          a.click()
+          URL.revokeObjectURL(url)
+          const ev = artifact as { classification?: string }
+          const cls = ev?.classification ?? 'unknown'
+          if (downloadEvidenceStatus) {
+            downloadEvidenceStatus.textContent = `Downloaded. Classification: ${cls}`
+          }
+        })
+        .catch((err: unknown) => {
+          if (downloadEvidenceStatus) {
+            downloadEvidenceStatus.textContent = `Capture failed: ${String(err)}`
+          }
+        })
+        .finally(() => {
+          downloadEvidenceBtn.disabled = false
+        })
+    })
+  }
+
+  // ---------------------------------------------------------------------------
   // Invalidate Path form
   // ---------------------------------------------------------------------------
 
@@ -535,7 +608,7 @@ if (typeof document !== 'undefined') {
     invalidateForm.addEventListener('submit', (e) => {
       e.preventDefault()
       const path = invalidatePathInput?.value.trim() || '/api/products/1'
-      const url = `http://localhost:3001/api/invalidate${path}`
+      const url = `${DASHBOARD_API_ORIGIN}/api/invalidate${path}`
 
       if (invalidateBtn) invalidateBtn.disabled = true
       if (invalidateResult) invalidateResult.textContent = ''

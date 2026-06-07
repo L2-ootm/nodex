@@ -3,149 +3,531 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Nodex Metrics</title>
-  <link rel="stylesheet" href="./dashboard.css" />
+  <title>Nodex Beta</title>
+  <meta name="color-scheme" content="dark" />
+  <link rel="stylesheet" href="./beta.css" />
 </head>
-<body>
+<body class="beta-body">
 
-  <!-- Page Header -->
-  <header class="page-header">
-    <span class="live-dot" id="live-dot" aria-label="Service Worker connection status"></span>
-    <span class="page-header__title">Nodex Metrics</span>
-    <div class="page-header__chips">
-      <span id="sw-status-chip">SW: loading...</span>
-      <span id="buffer-chip">Buffer: 0</span>
+  <header class="beta-topbar">
+    <a class="brand-lockup" href="./" aria-label="Nodex home">
+      <span class="brand-mark" aria-hidden="true">
+        <img src="./assets/nodex-x-emblem-clean.png" alt="" />
+      </span>
+      <span class="brand-wordmark">
+        <span class="brand-name">Node<span class="brand-x">x</span></span>
+        <span class="brand-beta-pill">Beta</span>
+        <span class="brand-subtitle">Validation suite</span>
+      </span>
+    </a>
+
+    <nav class="topbar-nav hidden" id="topbar-nav" aria-label="Nodex suite navigation">
+      <a href="#setup" data-suite-link="setup">Setup</a>
+      <a href="#profile" data-suite-link="profile">Profile</a>
+      <a href="#room" data-suite-link="room">Test room</a>
+      <a href="#evidence" data-suite-link="evidence">Evidence</a>
+      <a class="admin-only hidden" href="#admin" data-suite-link="admin">Admin lab</a>
+    </nav>
+
+    <div class="topbar-right">
+      <div class="topbar-identity hidden" id="topbar-identity">
+        <span class="identity-avatar" id="topbar-avatar"></span>
+        <span class="identity-name" id="topbar-name"></span>
+        <span class="identity-role" id="topbar-role">tester</span>
+      </div>
+      <button class="ghost-button hidden" id="logout-button" type="button">Sign out</button>
     </div>
   </header>
 
-  <main class="main">
+  <main class="beta-shell">
 
-    <!-- SW not-detected banner (hidden by default) -->
-    <div class="sw-banner" id="sw-banner" hidden>
-      Service Worker not registered. Ensure sw.js is served from the page origin.
-    </div>
-
-    <!-- Hit Rate Summary -->
-    <div class="stat-cards">
-      <div class="stat-card">
-        <span class="stat-display" id="hit-rate-display">0.0%</span>
-        <span class="stat-label">Cache Hit Rate</span>
-      </div>
-      <div class="stat-card">
-        <span class="stat-display" id="fallback-display">0.0%</span>
-        <span class="stat-label">Server Fallback</span>
-      </div>
-    </div>
-
-    <!-- Event Log Table -->
-    <section class="section-panel">
-      <div class="section-panel__header">
-        <h2>Event Log</h2>
+    <!-- ── Login ─────────────────────────────────────────────── -->
+    <section class="login-scene" id="login-screen">
+      <div class="login-copy">
+        <p class="eyebrow">Private beta access</p>
+        <h1>Nodex beta testing, guided.</h1>
+        <p>Use your invitation once, follow a guided checklist, and send the test evidence without opening developer tools.</p>
+        <div class="trust-row" aria-label="What this beta captures">
+          <span>Guided steps</span>
+          <span>Evidence receipt</span>
+          <span>Role-aware access</span>
+        </div>
       </div>
 
-      <!-- Empty state -->
-      <div class="empty-state" id="empty-state">
-        <p class="empty-state__heading">No events yet</p>
-        <p class="empty-state__body">Trigger a fetch request above to start recording cache decisions.</p>
-      </div>
+      <figure class="login-media brand-seal" aria-label="Nodex brand identity">
+        <div class="media-stage brand-seal-stage" aria-hidden="true">
+          <img class="asset-emblem-large" src="./assets/nodex-x-emblem-clean.png" alt="" />
+        </div>
+        <figcaption>
+          <span>Nodex validation suite</span>
+          <strong>Private beta access for coordinated browser testing.</strong>
+        </figcaption>
+      </figure>
 
-      <table class="event-table" aria-label="Cache decision events">
-        <thead>
-          <tr>
-            <th scope="col">Type</th>
-            <th scope="col">Key</th>
-            <th scope="col" class="col-right">latency_ms</th>
-            <th scope="col">source_node_id</th>
-            <th scope="col">Timestamp</th>
-          </tr>
-        </thead>
-        <tbody id="event-tbody">
-          <!-- Rows prepended by dashboard.ts -->
-        </tbody>
-      </table>
+      <form class="login-card" id="beta-login-form" novalidate>
+        <div>
+          <p class="card-kicker">Sign in</p>
+          <h2>Enter your invitation</h2>
+          <p class="subtle-copy">Tester invites open the guided test. Admin invites open the control room.</p>
+        </div>
+        <label class="field-stack" for="invite-token">
+          <span>Invitation token</span>
+          <input class="input-field" id="invite-token" type="password" autocomplete="off" />
+        </label>
+        <details class="advanced-toggle">
+          <summary>Advanced</summary>
+          <label class="field-stack" for="coordinator-url">
+            <span>Coordinator URL</span>
+            <input class="input-field" id="coordinator-url" autocomplete="off" />
+          </label>
+        </details>
+        <button class="primary-button" type="submit">Continue</button>
+        <p class="form-feedback" id="login-status"></p>
+      </form>
     </section>
 
-    <!-- Request Trigger Form -->
-    <section class="section-panel">
-      <div class="section-panel__header">
-        <h2>Request Trigger</h2>
-      </div>
-      <div class="section-panel__body">
-        <form class="trigger-form" id="fetch-form" novalidate>
-          <div class="form-row">
-            <label class="form-label" for="product-id">Product ID:</label>
-            <input
-              type="text"
-              class="input-field"
-              id="product-id"
-              name="product-id"
-              placeholder="1"
-              value="1"
-              autocomplete="off"
-            />
-            <button type="submit" class="btn btn--primary" id="fetch-btn">
-              Fetch Product
-            </button>
+    <!-- ── App ───────────────────────────────────────────────── -->
+    <section class="suite-app hidden" id="suite-app">
+
+      <!-- Welcome banner -->
+      <section class="welcome-panel" data-suite-page="setup" id="setup">
+        <div>
+          <p class="eyebrow">Signed in as <span id="token-role">tester</span></p>
+          <h1 id="workspace-title"><span id="tester-name-greeting">Your</span> Nodex beta workspace.</h1>
+          <p id="workspace-copy">Follow the checklist below. We will collect the browser diagnostics and keep a clear record of your participation.</p>
+          <p class="invite-note" id="invite-welcome-note"></p>
+        </div>
+        <div class="status-bento" aria-label="Beta readiness">
+          <div>
+            <span>Access</span>
+            <strong id="token-preview">saved</strong>
           </div>
-          <span class="form-feedback form-feedback--error" id="fetch-error"></span>
-        </form>
-      </div>
-    </section>
-
-    <!-- Invalidate Trigger Form -->
-    <section class="section-panel">
-      <div class="section-panel__header">
-        <h2>Invalidate Path</h2>
-      </div>
-      <div class="section-panel__body">
-        <form class="trigger-form" id="invalidate-form" novalidate>
-          <div class="form-row">
-            <label class="form-label" for="invalidate-path">Path:</label>
-            <input
-              type="text"
-              class="input-field"
-              id="invalidate-path"
-              name="invalidate-path"
-              placeholder="/api/products/1"
-              value="/api/products/1"
-              autocomplete="off"
-            />
-            <button type="submit" class="btn btn--destructive" id="invalidate-btn">
-              Invalidate Path
-            </button>
+          <div>
+            <span>Session</span>
+            <strong id="session-state">not started</strong>
           </div>
-          <span class="form-feedback" id="invalidate-result"></span>
-        </form>
-      </div>
-    </section>
+          <div>
+            <span>Log bundle</span>
+            <strong id="log-count">0 events</strong>
+          </div>
+        </div>
+      </section>
 
-    <!-- Volatility Tiers Panel (Phase 4, VOL-04) -->
-    <section class="section-panel" id="volatility-panel" hidden>
-      <div class="section-panel__header">
-        <h2>Volatility Tiers</h2>
-      </div>
+      <section class="readiness-brief" id="readiness-brief" data-suite-page="setup">
+        <div>
+          <p class="eyebrow">Before you start</p>
+          <h2>What this test will ask you to do</h2>
+        </div>
+        <ol class="brief-list">
+          <li><span>1</span><strong>Confirm who is testing</strong><small>Name, city, network, and optional credit note.</small></li>
+          <li><span>2</span><strong>Run a guided browser test</strong><small>The app checks cache behavior and records local diagnostics.</small></li>
+          <li><span>3</span><strong>Send your evidence</strong><small>You receive a clear saved state and the admin sees the log bundle.</small></li>
+        </ol>
+      </section>
 
-      <div class="empty-state" id="volatility-empty-state">
-        <p class="empty-state__heading">No volatility data yet</p>
-        <p class="empty-state__body">Trigger gossip invalidations to see per-key volatility scores.</p>
-      </div>
+      <!-- ── Mode selector ─────────────────────────────────── -->
+      <section class="mode-select" id="mode-select" data-suite-page="setup">
+        <div class="mode-select-header">
+          <p class="eyebrow">Test type</p>
+          <h2>How are you testing today?</h2>
+          <p>Choose the simplest option that matches your situation. Multi-person tests wait until the right people are online.</p>
+        </div>
+        <div class="mode-grid">
 
-      <table class="event-table" id="volatility-table" aria-label="Per-key volatility tiers" hidden>
-        <thead>
-          <tr>
-            <th scope="col">Key</th>
-            <th scope="col">Tier</th>
-            <th scope="col" class="col-right">Score</th>
-          </tr>
-        </thead>
-        <tbody id="volatility-tbody">
-          <!-- Rows upserted by dashboard.ts on volatility-update events -->
-        </tbody>
-      </table>
-    </section>
+          <button class="mode-tile" data-mode="solo" id="btn-mode-solo" type="button">
+            <span class="mode-nodes" aria-hidden="true">
+              <span class="mode-node on"></span>
+            </span>
+            <strong>Just me</strong>
+            <p>One browser. Fastest way to verify the guided flow, diagnostics, and evidence submission.</p>
+            <span class="mode-tag">No wait</span>
+          </button>
 
+          <button class="mode-tile" data-mode="duo" id="btn-mode-duo" type="button">
+            <span class="mode-nodes" aria-hidden="true">
+              <span class="mode-node on"></span>
+              <span class="mode-node dim"></span>
+            </span>
+            <strong>Me + coordinator</strong>
+            <p>Two browsers. Use this when a coordinator is online to validate a real peer-to-peer connection.</p>
+            <span class="mode-tag">Needs coordinator</span>
+          </button>
+
+          <button class="mode-tile" data-mode="trio" id="btn-mode-trio" type="button">
+            <span class="mode-nodes" aria-hidden="true">
+              <span class="mode-node on"></span>
+              <span class="mode-node dim"></span>
+              <span class="mode-node dim"></span>
+            </span>
+            <strong>Three-person test</strong>
+            <p>Full room. Use this for the strongest evidence class with coordinator and another tester online.</p>
+            <span class="mode-tag">Needs all 3</span>
+          </button>
+
+        </div>
+      </section>
+
+      <!-- ── Connectivity check (duo / trio only) ──────────── -->
+      <section class="conn-panel hidden" id="conn-panel" data-suite-page="setup">
+        <div class="conn-header-row">
+          <div>
+            <p class="eyebrow">Connectivity check</p>
+            <h2 id="conn-title">Who is online right now</h2>
+            <p id="conn-desc">The test unlocks once everyone needed is showing as online. This refreshes automatically every 30 seconds.</p>
+          </div>
+          <button class="secondary-button" id="btn-refresh-presence" type="button">Refresh now</button>
+        </div>
+        <div class="topology-view" id="topology-view">
+          <div class="topology-canvas" id="topology-canvas">
+            <p class="topo-placeholder">Checking presence...</p>
+          </div>
+        </div>
+        <ul class="peer-list sr-only" id="peer-list" aria-live="polite"></ul>
+        <div class="conn-actions">
+          <button class="primary-button" id="btn-start-connected" type="button" disabled>Everyone is ready — Start test</button>
+          <button class="secondary-button" id="btn-back-mode" type="button">Change test type</button>
+        </div>
+        <p class="form-feedback" id="conn-status"></p>
+      </section>
+
+      <!-- ── Test steps ─────────────────────────────────────── -->
+      <section class="test-steps hidden" id="test-steps">
+
+        <!-- Compact topology bar (duo / trio only) -->
+        <div class="topo-bar hidden" id="topo-bar">
+          <span class="topo-bar-label">Network</span>
+          <div class="topo-bar-canvas" id="topo-bar-canvas"></div>
+        </div>
+
+        <!-- Phase progress rail -->
+        <div class="phase-rail" id="phase-rail" aria-label="Test progress">
+          <div class="phase-step" data-phase="profile" data-status="pending">
+            <div class="phase-icon">1</div>
+            <span>Profile</span>
+          </div>
+          <div class="phase-track" id="track-profile-session"></div>
+          <div class="phase-step" data-phase="session" data-status="pending">
+            <div class="phase-icon">2</div>
+            <span>Session</span>
+          </div>
+          <div class="phase-track" id="track-session-simulation"></div>
+          <div class="phase-step" data-phase="simulation" data-status="pending">
+            <div class="phase-icon">3</div>
+            <span>Test run</span>
+          </div>
+          <div class="phase-track" id="track-simulation-evidence"></div>
+          <div class="phase-step" data-phase="evidence" data-status="pending">
+            <div class="phase-icon">4</div>
+            <span>Result</span>
+          </div>
+          <div class="phase-track" id="track-evidence-sent"></div>
+          <div class="phase-step" data-phase="sent" data-status="pending">
+            <div class="phase-icon">5</div>
+            <span>Logs sent</span>
+          </div>
+        </div>
+
+        <!-- Step 1: Profile + assignment -->
+        <section class="beta-grid-app" id="tester" data-suite-page="profile">
+          <article class="soft-panel profile-panel">
+            <div class="panel-heading">
+              <p class="card-kicker">Step 1</p>
+              <h2>Confirm your test details</h2>
+              <p>This creates the participation record used to review evidence later.</p>
+            </div>
+            <form class="friendly-form" id="beta-session-form" novalidate>
+              <label class="field-stack" for="tester-name">
+                <span>Name</span>
+                <input class="input-field" id="tester-name" autocomplete="name" />
+              </label>
+              <label class="field-stack" for="tester-email">
+                <span>Email</span>
+                <input class="input-field" id="tester-email" autocomplete="email" />
+              </label>
+              <div class="two-field-row">
+                <label class="field-stack" for="tester-city">
+                  <span>City</span>
+                  <input class="input-field" id="tester-city" autocomplete="address-level2" />
+                </label>
+                <label class="field-stack" for="tester-country">
+                  <span>Country</span>
+                  <input class="input-field" id="tester-country" autocomplete="country-name" />
+                </label>
+              </div>
+              <label class="field-stack" for="tester-network">
+                <span>Network</span>
+                <input class="input-field" id="tester-network" placeholder="home Wi-Fi, phone hotspot, office" autocomplete="off" />
+              </label>
+              <label class="field-stack" for="contribution-note">
+                <span>Contribution Note</span>
+                <textarea class="input-field beta-textarea" id="contribution-note" placeholder="Anything useful you noticed while helping test."></textarea>
+              </label>
+              <label class="consent-line">
+                <input id="tester-consent" type="checkbox" />
+                <span>I consent to be credited in the Nodex contributor/test evidence ledger.</span>
+              </label>
+              <button type="submit" class="primary-button">Create Session</button>
+            </form>
+            <p class="form-feedback" id="beta-status"></p>
+          </article>
+
+          <aside class="soft-panel assignment-card">
+            <div class="panel-heading">
+              <p class="card-kicker">Assigned run</p>
+              <h2>Your test room</h2>
+            </div>
+            <dl class="assignment-list">
+              <div>
+                <dt>Participant</dt>
+                <dd class="mono" id="participant-id">not assigned</dd>
+              </div>
+              <div>
+                <dt>Room</dt>
+                <dd class="mono" id="room-id">not assigned</dd>
+              </div>
+              <div>
+                <dt>Test URL</dt>
+                <dd><a class="soft-link mono" id="test-url" href="#">not assigned</a></dd>
+              </div>
+            </dl>
+            <a class="secondary-button" id="open-test-url" href="#" target="_blank" rel="noreferrer">Open test room</a>
+            <p class="form-feedback" id="room-status"></p>
+          </aside>
+        </section>
+
+        <!-- Step 2: Guided run -->
+        <section class="guided-run" id="room" data-suite-page="room">
+            <div class="run-copy">
+              <p class="eyebrow">Step 2</p>
+              <h2 id="run-title-heading">Run the guided test.</h2>
+              <p id="run-desc">This checks browser cache behavior, encrypted responses, and the diagnostics needed for review.</p>
+            </div>
+          <div class="run-actions">
+            <button class="primary-button" id="run-local-simulation" type="button">Run Guided Test</button>
+            <button class="primary-button" id="send-log-bundle" type="button">Send Logs to Admin</button>
+            <button class="secondary-button" id="download-log-bundle" type="button">Download Logs</button>
+            <button class="secondary-button" id="copy-log-bundle" type="button">Copy Logs</button>
+          </div>
+        </section>
+
+        <!-- Step 3: Evidence + logs -->
+        <section class="evidence-and-logs" id="logs" data-suite-page="evidence">
+          <article class="soft-panel evidence-panel">
+            <div class="panel-heading">
+              <p class="card-kicker">Step 3</p>
+              <h2>Review and send evidence</h2>
+              <p>Choose what happened. If you are unsure, choose partial and add a short note.</p>
+            </div>
+            <form class="friendly-form" id="evidence-form" novalidate>
+              <label class="field-stack" for="topology-label">
+                <span>Topology</span>
+                <select class="input-field" id="topology-label">
+                  <option value="lan-multi-machine">Two devices on the same Wi-Fi</option>
+                  <option value="wan-nat">Different networks in the same city</option>
+                  <option value="turn-relay">TURN relay fallback</option>
+                  <option value="background-tab">Background browser tab</option>
+                  <option value="mobile-browser">Mobile browser</option>
+                  <option value="geographic-long-range">Different city or region</option>
+                </select>
+              </label>
+              <label class="field-stack" for="evidence-result">
+                <span>Result</span>
+                <select class="input-field" id="evidence-result">
+                  <option value="pass">It worked</option>
+                  <option value="partial">It partly worked</option>
+                  <option value="fail">It failed</option>
+                  <option value="not_measured">I could not measure it</option>
+                </select>
+              </label>
+              <label class="field-stack" for="evidence-notes">
+                <span>Notes</span>
+                <textarea class="input-field beta-textarea" id="evidence-notes" placeholder="What did you see? Did anything feel slow or confusing?"></textarea>
+              </label>
+              <button type="submit" class="primary-button">Save Evidence</button>
+            </form>
+            <p class="form-feedback" id="evidence-status"></p>
+          </article>
+
+          <article class="soft-panel log-panel">
+            <div class="panel-heading">
+              <p class="card-kicker">Local log bundle</p>
+              <h2>What we can send</h2>
+              <p>The bundle includes simulation events, browser details, storage estimate, and your selected result.</p>
+            </div>
+            <div class="simple-log" id="simple-log" aria-live="polite"></div>
+            <details class="raw-log-details">
+              <summary>Technical log bundle</summary>
+              <ol class="log-stream" id="local-log-stream" aria-live="polite"></ol>
+              <textarea class="input-field log-output" id="log-output" readonly></textarea>
+            </details>
+            <p class="form-feedback" id="log-status"></p>
+          </article>
+        </section>
+
+        <!-- Hacker POV — interceptor panel -->
+        <section class="interceptor-section hidden" id="interceptor-panel" data-suite-page="evidence">
+          <div class="interceptor-header">
+            <p class="eyebrow">Hacker POV</p>
+            <h2>What an attacker intercepts on the wire</h2>
+            <p>Every peer-to-peer payload is opaque ciphertext. The IV and auth tag make replay, tampering, and key-mismatch attacks detectable at decrypt time.</p>
+          </div>
+          <div class="interceptor-grid">
+            <div class="interceptor-field">
+              <span class="if-label">Key</span>
+              <code class="if-value" id="interceptor-key">—</code>
+            </div>
+            <div class="interceptor-field">
+              <span class="if-label">Seq</span>
+              <code class="if-value" id="interceptor-seq">—</code>
+            </div>
+            <div class="interceptor-field">
+              <span class="if-label">IV (base64)</span>
+              <code class="if-value" id="interceptor-iv">—</code>
+            </div>
+            <div class="interceptor-field wide">
+              <span class="if-label">Ciphertext sample</span>
+              <code class="if-value mono-small" id="interceptor-ct">—</code>
+            </div>
+            <div class="interceptor-field">
+              <span class="if-label">Captured at</span>
+              <code class="if-value" id="interceptor-ts">—</code>
+            </div>
+          </div>
+          <p class="interceptor-note">AES-GCM-256 — the auth tag rejects any tamper or key mismatch. Without the session key an attacker only observes random bytes.</p>
+        </section>
+
+      </section><!-- /#test-steps -->
+
+      <!-- ── Admin lab ──────────────────────────────────────── -->
+      <section class="admin-lab admin-only hidden" id="admin" data-suite-page="admin">
+        <div class="admin-intro">
+          <p class="eyebrow">Admin lab</p>
+          <h2>Start tests, manage tokens, and monitor evidence.</h2>
+          <p>Visible only for admin tokens. Use this to coordinate non-technical testers without sharing internal tooling.</p>
+        </div>
+
+        <div class="admin-grid">
+          <article class="soft-panel admin-command-card">
+            <div class="panel-heading">
+              <p class="card-kicker">Epidemic control</p>
+              <h3>Start a coordinated run</h3>
+            </div>
+            <form class="friendly-form" id="run-form" novalidate>
+              <label class="field-stack" for="run-title">
+                <span>Run title</span>
+                <input class="input-field" id="run-title" placeholder="Same-city beta rehearsal" />
+              </label>
+              <label class="field-stack" for="run-scenario">
+                <span>Scenario</span>
+                <select class="input-field" id="run-scenario">
+                  <option value="epidemic-gossip">Epidemic invalidation spread</option>
+                  <option value="p2p-cache-hit">P2P cache hit rehearsal</option>
+                  <option value="server-fallback">Server fallback comparison</option>
+                </select>
+              </label>
+              <label class="field-stack" for="run-data-type">
+                <span>Data type</span>
+                <select class="input-field" id="run-data-type">
+                  <option value="product-catalog">Product catalog</option>
+                  <option value="news-feed">News feed</option>
+                  <option value="inventory-price">Inventory/price update</option>
+                </select>
+              </label>
+              <label class="field-stack" for="run-node-count">
+                <span>Simulated node count</span>
+                <input class="input-field" id="run-node-count" type="number" min="2" max="50" value="10" />
+              </label>
+              <button class="primary-button" type="submit">Start Simulated Test</button>
+            </form>
+            <p class="form-feedback" id="run-status"></p>
+          </article>
+
+          <article class="soft-panel admin-token-card">
+            <div class="panel-heading">
+              <p class="card-kicker">Token management</p>
+              <h3>Create personal invites</h3>
+            </div>
+            <form class="friendly-form" id="token-form" novalidate>
+              <label class="field-stack" for="new-token-label">
+                <span>Label</span>
+                <input class="input-field" id="new-token-label" placeholder="Maria, early tester, cofounder" />
+              </label>
+              <label class="field-stack" for="new-token-name">
+                <span>Tester name</span>
+                <input class="input-field" id="new-token-name" placeholder="Maria Silva" autocomplete="off" />
+              </label>
+              <label class="field-stack" for="new-token-email">
+                <span>Tester email</span>
+                <input class="input-field" id="new-token-email" placeholder="maria@example.com" autocomplete="off" />
+              </label>
+              <label class="field-stack" for="new-token-note">
+                <span>Personal note</span>
+                <textarea class="input-field beta-textarea" id="new-token-note" placeholder="Maria, this invite is reserved for your phone hotspot test."></textarea>
+              </label>
+              <label class="field-stack" for="new-token-role">
+                <span>Role</span>
+                <select class="input-field" id="new-token-role">
+                  <option value="tester">Tester</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+              <label class="field-stack" for="new-token-max-sessions">
+                <span>Allowed sessions</span>
+                <input class="input-field" id="new-token-max-sessions" type="number" min="1" max="20" value="1" />
+              </label>
+              <button class="primary-button" type="submit">Create Token</button>
+            </form>
+            <p class="form-feedback" id="token-status"></p>
+            <div class="token-output hidden" id="created-token-box">
+              <span>Copy this token now</span>
+              <code id="created-token-value"></code>
+            </div>
+            <ul class="admin-list" id="token-list"></ul>
+          </article>
+
+          <article class="soft-panel admin-wide admin-capture-card">
+            <div class="panel-heading">
+              <p class="card-kicker">Wire captures</p>
+              <h3>Server-side interceptor log</h3>
+              <p>Every encrypted response logged by the API — shows what any network observer would see.</p>
+            </div>
+            <div class="interceptor-server-captures" id="interceptor-server-list">
+              <p class="muted-placeholder">No captures yet. Run a real test first.</p>
+            </div>
+            <button class="secondary-button" id="btn-poll-interceptor" type="button">Refresh captures</button>
+          </article>
+
+          <article class="soft-panel admin-wide admin-monitor-card">
+            <div class="panel-heading">
+              <p class="card-kicker">Monitor</p>
+              <h3>Recent runs and logs</h3>
+            </div>
+            <div class="simulation-summary" aria-label="Backend simulation metrics">
+              <div><span>Hit rate</span><strong id="sim-hit-rate">--</strong></div>
+              <div><span>P95 latency</span><strong id="sim-p95">--</strong></div>
+              <div><span>Origin reads avoided</span><strong id="sim-origin-saved">--</strong></div>
+              <div><span>Gossip reach</span><strong id="sim-reach">--</strong></div>
+            </div>
+            <div class="monitor-grid">
+              <ul class="admin-list" id="run-list"></ul>
+              <ul class="admin-list" id="remote-log-list"></ul>
+            </div>
+            <ul class="admin-list simulation-events" id="simulation-event-list"></ul>
+          </article>
+
+          <article class="soft-panel admin-wide admin-audit-card">
+            <div class="panel-heading">
+              <p class="card-kicker">Security audit</p>
+              <h3>Recent privileged events</h3>
+            </div>
+            <ul class="admin-list" id="audit-list"></ul>
+          </article>
+        </div>
+      </section>
+
+    </section><!-- /#suite-app -->
   </main>
 
-  <script type="module" src="./dashboard.ts"></script>
+  <script type="module" src="./beta.ts"></script>
 </body>
 </html>

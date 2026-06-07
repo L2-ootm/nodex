@@ -9,6 +9,7 @@
 // T-03-04: fresh 12-byte IV generated per encrypt call via crypto.getRandomValues
 // T-03-03: AES-GCM auth tag causes DOMException(OperationError) on tamper/wrong-key — re-thrown to caller
 // T-03-05 (accepted risk): extractable=true for PoC; production should set extractable=false
+// T-03-06: AES-GCM AAD binds key + seq + keyId so freshness metadata cannot be forged.
 
 /**
  * Import a 32-byte raw key as an AES-GCM CryptoKey.
@@ -27,6 +28,16 @@ export async function importKey(rawBytes: Uint8Array): Promise<CryptoKey> {
 }
 
 /**
+ * Build AES-GCM additional authenticated data for a Nodex payload.
+ *
+ * Server encryption and Service Worker decryption must use identical bytes.
+ * The version prefix lets a future format migrate without ambiguity.
+ */
+export function buildPayloadAad(key: string, seq: number, keyId: string): Uint8Array {
+  return new TextEncoder().encode(`nodex:v1|${key}|${seq}|${keyId}`)
+}
+
+/**
  * Encrypt plaintext with AES-GCM-256.
  *
  * T-03-04: generates a fresh 12-byte IV per call via crypto.getRandomValues.
@@ -39,10 +50,15 @@ export async function importKey(rawBytes: Uint8Array): Promise<CryptoKey> {
 export async function encrypt(
   plaintext: Uint8Array,
   key: CryptoKey,
+  additionalData?: Uint8Array,
 ): Promise<{ ciphertext: Uint8Array; iv: Uint8Array }> {
   const iv = crypto.getRandomValues(new Uint8Array(12))
   const result = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
+    {
+      name: 'AES-GCM',
+      iv: iv as unknown as Uint8Array<ArrayBuffer>,
+      ...(additionalData ? { additionalData: additionalData as unknown as Uint8Array<ArrayBuffer> } : {}),
+    },
     key,
     plaintext as unknown as Uint8Array<ArrayBuffer>,
   )
@@ -67,10 +83,15 @@ export async function decrypt(
   ciphertext: Uint8Array,
   iv: Uint8Array,
   key: CryptoKey,
+  additionalData?: Uint8Array,
 ): Promise<Uint8Array> {
   try {
     const result = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: iv as unknown as Uint8Array<ArrayBuffer> },
+      {
+        name: 'AES-GCM',
+        iv: iv as unknown as Uint8Array<ArrayBuffer>,
+        ...(additionalData ? { additionalData: additionalData as unknown as Uint8Array<ArrayBuffer> } : {}),
+      },
       key,
       ciphertext as unknown as Uint8Array<ArrayBuffer>,
     )
