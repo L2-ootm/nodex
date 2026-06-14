@@ -28,7 +28,7 @@ Final local-loopback validation:
 - Latest full-run metrics: 30 gossip runs, p50 7ms, p95 9ms, max 12ms, 90% all-node receipt in the latest sample, 98.02% cache/P2P hit rate.
 - Phase 7/8 automated validation: 114 Vitest tests passed, 5 Phase 7 Playwright tests passed, 5 Phase 7 stress tests passed, beta web Playwright passed, stress repeat passed 15/15, full `npm test` passed with 55 Playwright tests and 1 known skip, and `metrics:export` exports Phase 7 JSON/CSV.
 - Phase 7 report: 3 pass, 1 partial, 0 fail, 6 not measured. LAN/WAN/TURN/background/mobile/geography remain manual external evidence, but the Next beta flow now captures background-tab lifecycle and mobile-oriented browser/device hints automatically when testers submit evidence.
-- Supabase security advisor is clean as of 2026-05-25 after hardening `public.beta_ledger` with `security_invoker` and least-privilege view grants.
+- Backend security posture is tracked internally; public releases avoid exposing deployment-specific database migration details.
 
 ## Commands
 
