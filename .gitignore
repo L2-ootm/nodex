@@ -1,29 +1,41 @@
+# Dependencies and build output
 node_modules/
 dist/
 .next/
 **/.next/
-.next/
 test-results/
 beta-data/
-.env
-.env.*
-.env*.local
-.vercel
-.env.test
-docs/
-
-# Build artifacts (never track generated output)
+.vercel/
 *.tsbuildinfo
+
+# Generated beta runtime assets
 apps/beta-suite/public/assets/*.js
 apps/beta-suite/public/assets/*.css
 apps/beta-suite/public/sw.js
-*.tsbuildinfo
 
-# IDE / OS noise
+# Secrets and machine-local configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Local planning, research execution, and agent state
+.planning/
+.ultra/
+.codebase-memory/
+.mimocode/
+.mimocode-project-id
+Nodex_v1_*_Report.md
+Nodex_Emails_*.docx
+
+# Locally generated documentation and tool caches
+docs/
 .kilo/
 .ruff_cache/
 .pytest_cache/
-.env*.local
 
-docs/
-.vercel
+# IDE and operating-system noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
