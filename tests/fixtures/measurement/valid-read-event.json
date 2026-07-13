@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "event_type": "read_observed",
+  "event_id": "event-fixture-1",
+  "event_time_server_ms": 1784000000000,
+  "experiment_id": "nodex-observe-1",
+  "arm": "B3",
+  "assignment_id": "assignment-fixture-1",
+  "commit_sha": "abcdef1234567",
+  "build_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "protocol_version": "measurement-v1",
+  "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sample_probability": 0.25,
+  "region_coarse": "br-southeast",
+  "conventional_path": "cdn",
+  "http_status": 200,
+  "latency_ms": 24,
+  "response_bytes": 4096,
+  "object_class": "bounded",
+  "size_bucket": "1-16kb",
+  "auth_scope_class": "public",
+  "telemetry_complete": true
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nodex.local/schemas/measurement/v1/evidence-bundle-manifest.schema.json",
+  "title": "Nodex Measurement Evidence Bundle Manifest v2",
+  "type": "object",
+  "required": [
+    "schema_version", "bundle_id", "generated_at", "experiment_id", "claim_status",
+    "commit_sha", "working_tree_dirty", "build_digest", "protocol_version", "config_digest",
+    "schema_digest", "query_digest", "redaction_version", "assignment_spec_path",
+    "coverage_path", "artifacts", "source_bundle_refs", "limitations", "operator_kind"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "bundle_id": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "experiment_id": { "type": "string", "minLength": 1 },
+    "claim_status": { "enum": ["measured", "partial", "hypothesis", "not_measured", "inconclusive"] },
+    "commit_sha": { "type": "string", "pattern": "^[0-9a-fA-F]{7,64}$" },
+    "working_tree_dirty": { "type": "boolean" },
+    "build_digest": { "$ref": "#/$defs/sha256" },
+    "protocol_version": { "type": "string", "minLength": 1 },
+    "config_digest": { "$ref": "#/$defs/sha256" },
+    "schema_digest": { "$ref": "#/$defs/sha256" },
+    "query_digest": { "$ref": "#/$defs/sha256" },
+    "redaction_version": { "type": "string", "minLength": 1 },
+    "assignment_spec_path": { "type": "string", "minLength": 1 },
+    "coverage_path": { "type": "string", "minLength": 1 },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "sha256", "bytes"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "$ref": "#/$defs/sha256" },
+          "bytes": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "source_bundle_refs": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "operator_kind": { "enum": ["automation", "operator", "mixed"] }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "bundle_id": "bundle-fixture-1",
+  "generated_at": "2026-07-13T18:00:00.000Z",
+  "experiment_id": "nodex-observe-1",
+  "claim_status": "partial",
+  "commit_sha": "abcdef1234567",
+  "working_tree_dirty": false,
+  "build_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "protocol_version": "measurement-v1",
+  "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "schema_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "query_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "redaction_version": "redaction-v1",
+  "assignment_spec_path": "assignment-spec.json",
+  "coverage_path": "data/coverage.json",
+  "artifacts": [
+    {
+      "path": "data/events-0001.jsonl",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "bytes": 1024
+    }
+  ],
+  "source_bundle_refs": [],
+  "limitations": ["pilot thresholds are provisional"],
+  "operator_kind": "automation"
+}

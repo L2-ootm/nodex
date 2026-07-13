@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nodex.local/schemas/measurement/v1/measurement-events.schema.json",
+  "title": "Nodex Measurement Events v1",
+  "oneOf": [
+    { "$ref": "#/$defs/read_observed" },
+    { "$ref": "#/$defs/shadow_decision" },
+    { "$ref": "#/$defs/webrtc_probe" },
+    { "$ref": "#/$defs/invalidation_observed" },
+    { "$ref": "#/$defs/coverage" }
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": [
+        "schema_version", "event_type", "event_id", "event_time_server_ms",
+        "experiment_id", "arm", "assignment_id", "commit_sha", "build_digest",
+        "protocol_version", "config_digest", "sample_probability", "region_coarse"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "event_type": { "enum": ["read_observed", "shadow_decision", "webrtc_probe", "invalidation_observed", "coverage"] },
+        "event_id": { "$ref": "#/$defs/non_empty" },
+        "event_time_server_ms": { "$ref": "#/$defs/non_negative_integer" },
+        "experiment_id": { "$ref": "#/$defs/non_empty" },
+        "arm": { "enum": ["B0", "B1", "B2", "B3", "B4", "P1", "P2"] },
+        "assignment_id": { "$ref": "#/$defs/non_empty" },
+        "commit_sha": { "type": "string", "pattern": "^[0-9a-fA-F]{7,64}$" },
+        "build_digest": { "$ref": "#/$defs/sha256" },
+        "protocol_version": { "$ref": "#/$defs/non_empty" },
+        "config_digest": { "$ref": "#/$defs/sha256" },
+        "sample_probability": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "region_coarse": { "$ref": "#/$defs/non_empty" },
+        "run_id": { "$ref": "#/$defs/non_empty" },
+        "request_id": { "$ref": "#/$defs/non_empty" },
+        "session_id_ephemeral": { "$ref": "#/$defs/non_empty" },
+        "tenant_hash_epoch": { "$ref": "#/$defs/non_empty" },
+        "key_hash_epoch": { "$ref": "#/$defs/non_empty" },
+        "consent_version": { "$ref": "#/$defs/non_empty" },
+        "browser_engine_major": { "$ref": "#/$defs/non_empty" },
+        "os_major": { "$ref": "#/$defs/non_empty" },
+        "device_class": { "$ref": "#/$defs/non_empty" },
+        "visibility_state": { "$ref": "#/$defs/non_empty" },
+        "monotonic_offset_ms": { "type": "number" },
+        "clock_uncertainty_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "read_observed": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["conventional_path", "http_status", "latency_ms", "response_bytes", "object_class", "size_bucket", "auth_scope_class", "telemetry_complete"],
+          "properties": {
+            "event_type": { "const": "read_observed" },
+            "conventional_path": { "enum": ["origin", "cdn", "sw"] },
+            "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "latency_ms": { "$ref": "#/$defs/non_negative" },
+            "response_bytes": { "$ref": "#/$defs/non_negative" },
+            "object_class": { "$ref": "#/$defs/non_empty" },
+            "size_bucket": { "$ref": "#/$defs/non_empty" },
+            "auth_scope_class": { "$ref": "#/$defs/non_empty" },
+            "telemetry_complete": { "type": "boolean" },
+            "cdn_cache_status": { "$ref": "#/$defs/non_empty" },
+            "cdn_age_ms": { "$ref": "#/$defs/non_negative" },
+            "returned_epoch": { "$ref": "#/$defs/non_negative_integer" },
+            "returned_counter": { "$ref": "#/$defs/non_negative_integer" },
+            "authoritative_epoch": { "$ref": "#/$defs/non_negative_integer" },
+            "authoritative_counter": { "$ref": "#/$defs/non_negative_integer" },
+            "k_versions": { "$ref": "#/$defs/non_negative" },
+            "t_ms": { "$ref": "#/$defs/non_negative" },
+            "proof_age_ms": { "$ref": "#/$defs/non_negative" },
+            "admission_result": { "enum": ["admitted", "rejected", "not_evaluated"] },
+            "admission_reason": { "$ref": "#/$defs/non_empty" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "shadow_decision": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["shadow_mode", "eligible", "would_choose", "actual_path", "policy_version", "reason_codes", "decision_latency_ms", "mismatch_class"],
+          "properties": {
+            "event_type": { "const": "shadow_decision" },
+            "shadow_mode": { "enum": ["S1", "S2", "S3"] },
+            "eligible": { "type": "boolean" },
+            "would_choose": { "enum": ["origin", "cdn", "sw", "peer", "none"] },
+            "actual_path": { "enum": ["origin", "cdn", "sw"] },
+            "policy_version": { "$ref": "#/$defs/non_empty" },
+            "reason_codes": { "type": "array", "items": { "$ref": "#/$defs/reason_code" } },
+            "decision_latency_ms": { "$ref": "#/$defs/non_negative" },
+            "mismatch_class": { "$ref": "#/$defs/non_empty" },
+            "candidate_epoch": { "$ref": "#/$defs/non_negative_integer" },
+            "candidate_counter": { "$ref": "#/$defs/non_negative_integer" },
+            "would_admit": { "type": "boolean" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "webrtc_probe": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["topology_label", "probe_phase", "pair_role", "attempt_number", "signaling_state", "ice_state", "datachannel_state", "duration_ms", "useful_bytes", "control_bytes", "payload_digest_verified"],
+          "properties": {
+            "event_type": { "const": "webrtc_probe" },
+            "topology_label": { "$ref": "#/$defs/non_empty" },
+            "probe_phase": { "$ref": "#/$defs/non_empty" },
+            "pair_role": { "enum": ["initiator", "responder"] },
+            "attempt_number": { "type": "integer", "minimum": 1 },
+            "signaling_state": { "$ref": "#/$defs/non_empty" },
+            "ice_state": { "$ref": "#/$defs/non_empty" },
+            "datachannel_state": { "$ref": "#/$defs/non_empty" },
+            "duration_ms": { "$ref": "#/$defs/non_negative" },
+            "useful_bytes": { "$ref": "#/$defs/non_negative" },
+            "control_bytes": { "$ref": "#/$defs/non_negative" },
+            "payload_digest_verified": { "type": "boolean" },
+            "selected_candidate_type": { "enum": ["host", "srflx", "relay", "unknown"] },
+            "relay_transport": { "$ref": "#/$defs/non_empty" },
+            "ip_family": { "enum": ["ipv4", "ipv6", "nat64", "unknown"] },
+            "rtt_ms": { "$ref": "#/$defs/non_negative" },
+            "failure_stage": { "$ref": "#/$defs/non_empty" },
+            "failure_reason": { "$ref": "#/$defs/non_empty" },
+            "turn_region": { "$ref": "#/$defs/non_empty" },
+            "network_transition": { "$ref": "#/$defs/non_empty" },
+            "lifecycle_state": { "$ref": "#/$defs/non_empty" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "invalidation_observed": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["invalidation_id", "object_class", "authoritative_epoch", "authoritative_counter", "publish_ms", "duplicate", "reordered", "outcome"],
+          "properties": {
+            "event_type": { "const": "invalidation_observed" },
+            "invalidation_id": { "$ref": "#/$defs/non_empty" },
+            "object_class": { "$ref": "#/$defs/non_empty" },
+            "authoritative_epoch": { "$ref": "#/$defs/non_negative_integer" },
+            "authoritative_counter": { "$ref": "#/$defs/non_negative_integer" },
+            "publish_ms": { "$ref": "#/$defs/non_negative_integer" },
+            "duplicate": { "type": "boolean" },
+            "reordered": { "type": "boolean" },
+            "outcome": { "$ref": "#/$defs/non_empty" },
+            "edge_receive_ms": { "$ref": "#/$defs/non_negative_integer" },
+            "browser_receive_ms": { "$ref": "#/$defs/non_negative_integer" },
+            "applied_epoch": { "$ref": "#/$defs/non_negative_integer" },
+            "applied_counter": { "$ref": "#/$defs/non_negative_integer" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "coverage": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["expected_assignments", "observed_assignments", "completed", "missing_by_stage", "cells", "exclusions", "contamination_rate", "join_success_rate", "ground_truth_coverage", "claim_status"],
+          "properties": {
+            "event_type": { "const": "coverage" },
+            "expected_assignments": { "$ref": "#/$defs/non_negative_integer" },
+            "observed_assignments": { "$ref": "#/$defs/non_negative_integer" },
+            "completed": { "$ref": "#/$defs/non_negative_integer" },
+            "missing_by_stage": { "type": "object", "additionalProperties": { "$ref": "#/$defs/non_negative_integer" } },
+            "cells": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["cell_id", "expected", "observed"],
+                "properties": {
+                  "cell_id": { "$ref": "#/$defs/non_empty" },
+                  "expected": { "$ref": "#/$defs/non_negative_integer" },
+                  "observed": { "$ref": "#/$defs/non_negative_integer" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "exclusions": { "type": "array", "items": { "type": "string" } },
+            "contamination_rate": { "$ref": "#/$defs/rate" },
+            "join_success_rate": { "$ref": "#/$defs/rate" },
+            "ground_truth_coverage": { "$ref": "#/$defs/rate" },
+            "claim_status": { "$ref": "#/$defs/claim_status" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "non_empty": { "type": "string", "minLength": 1 },
+    "non_negative": { "type": "number", "minimum": 0 },
+    "non_negative_integer": { "type": "integer", "minimum": 0 },
+    "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "reason_code": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]{2,63}$" },
+    "claim_status": { "enum": ["measured", "partial", "hypothesis", "not_measured", "inconclusive"] }
+  }
+}
