@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { SequenceAuthorityUnavailableError } from './sequence-authority.js'
 import { createSequenceAuthorityFromEnv } from './sequence-authority-provider.js'
 import { SupabaseSequenceAuthority } from './supabase-sequence-authority.js'
+import { InMemorySequenceAuthority } from './in-memory-sequence-authority.js'
 
 const configuredEnv = {
   NODEX_SEQUENCE_DRIVER: 'supabase',
@@ -20,6 +21,19 @@ describe('sequence authority provider', () => {
     expect(() => createSequenceAuthorityFromEnv({
       ...configuredEnv,
       NODEX_SEQUENCE_DRIVER: 'unknown',
+    })).toThrow(SequenceAuthorityUnavailableError)
+  })
+
+  it('allows the memory reference driver only outside production', () => {
+    expect(createSequenceAuthorityFromEnv({
+      NODEX_SEQUENCE_DRIVER: 'memory',
+      NODEX_TENANT_ID: configuredEnv.NODEX_TENANT_ID,
+    })).toBeInstanceOf(InMemorySequenceAuthority)
+
+    expect(() => createSequenceAuthorityFromEnv({
+      NODEX_SEQUENCE_DRIVER: 'memory',
+      NODEX_TENANT_ID: configuredEnv.NODEX_TENANT_ID,
+      NODE_ENV: 'production',
     })).toThrow(SequenceAuthorityUnavailableError)
   })
 })
