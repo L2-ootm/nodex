@@ -142,9 +142,10 @@ describe('mock-api', () => {
     const prodRes = await app.request('/api/products/42')
     const ct = await prodRes.text()
     const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
+    const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
 
     const plaintext = await globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, 'default') },
+      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, 'default', validatedAt) },
       cryptoKey,
       Buffer.from(ct, 'base64')
     )
@@ -168,14 +169,30 @@ describe('mock-api', () => {
     const prodRes = await app.request('/api/products/42')
     const ct = await prodRes.text()
     const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
+    const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
 
     await expect(
       globalThis.crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, 'default') },
+        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, 'default', validatedAt) },
         cryptoKey,
         Buffer.from(ct, 'base64')
       )
     ).rejects.toBeInstanceOf(DOMException)
+  })
+
+  it('ciphertext rejects a forged X-Nodex-Validated-At value', async () => {
+    const keyRes = await app.request('/api/session-key')
+    const { keyBytes } = await keyRes.json() as { keyBytes: string }
+    const cryptoKey = await globalThis.crypto.subtle.importKey('raw', Buffer.from(keyBytes, 'base64'), { name: 'AES-GCM' }, false, ['decrypt'])
+    const prodRes = await app.request('/api/products/42')
+    const ct = await prodRes.text()
+    const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
+    const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
+    await expect(globalThis.crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, 'default', validatedAt + 1) },
+      cryptoKey,
+      Buffer.from(ct, 'base64')
+    )).rejects.toBeInstanceOf(DOMException)
   })
 })
 
@@ -203,6 +220,15 @@ describe('mock-api — version metadata headers (IMPL-01)', () => {
     expect(updatedAt).not.toBeNull()
     expect(Number.isInteger(Number(updatedAt!))).toBe(true)
     expect(Number(updatedAt!)).toBeGreaterThan(0)
+  })
+
+  it('X-Nodex-Validated-At is a fresh epoch timestamp', async () => {
+    const before = Date.now()
+    const res = await app.request('/api/products/1')
+    const validatedAt = Number(res.headers.get('X-Nodex-Validated-At'))
+    expect(Number.isSafeInteger(validatedAt)).toBe(true)
+    expect(validatedAt).toBeGreaterThanOrEqual(before)
+    expect(validatedAt).toBeLessThanOrEqual(Date.now())
   })
 
   it('X-Nodex-Policy equals bounded-staleness', async () => {

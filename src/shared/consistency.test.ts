@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { admitCandidate, observeVersion, type CandidatePayloadMeta, type ConsistencyPolicy } from './consistency.js'
+import {
+  admitAuthoritativeVersion,
+  admitAuthoritativeMetadata,
+  admitCandidate,
+  observeVersion,
+  type CandidatePayloadMeta,
+  type ConsistencyPolicy,
+} from './consistency.js'
 
 const now = 1_000_000
 
@@ -148,5 +155,35 @@ describe('admitCandidate — null/invalid inputs (IMPL-02)', () => {
       latestKnownVersion: 10,
       now,
     })).toEqual({ admitted: false, reason: 'invalid-candidate' })
+  })
+})
+
+describe('admitAuthoritativeVersion', () => {
+  it('accepts an authoritative version at or above the session barrier', () => {
+    expect(admitAuthoritativeVersion('10', 10)).toEqual({ admitted: true, version: 10 })
+    expect(admitAuthoritativeVersion('12', 10)).toEqual({ admitted: true, version: 12 })
+  })
+
+  it('rejects a lagging origin or intermediary response', () => {
+    expect(admitAuthoritativeVersion('9', 10)).toEqual({
+      admitted: false,
+      reason: 'below-session-observed',
+    })
+  })
+
+  it('fails closed when version metadata is missing or malformed', () => {
+    expect(admitAuthoritativeVersion(null, 0)).toEqual({ admitted: false, reason: 'missing-version' })
+    expect(admitAuthoritativeVersion('', 0)).toEqual({ admitted: false, reason: 'missing-version' })
+    expect(admitAuthoritativeVersion('1.5', 0)).toEqual({ admitted: false, reason: 'invalid-version' })
+    expect(admitAuthoritativeVersion('not-a-version', 0)).toEqual({ admitted: false, reason: 'invalid-version' })
+  })
+})
+
+describe('admitAuthoritativeMetadata', () => {
+  it('requires a valid server timestamp alongside a non-regressing version', () => {
+    expect(admitAuthoritativeMetadata('10', '1000000', 9)).toEqual({ admitted: true, version: 10, validatedAt: 1000000 })
+    expect(admitAuthoritativeMetadata('10', null, 9)).toEqual({ admitted: false, reason: 'missing-validated-at' })
+    expect(admitAuthoritativeMetadata('10', 'not-a-time', 9)).toEqual({ admitted: false, reason: 'invalid-validated-at' })
+    expect(admitAuthoritativeMetadata('8', '1000000', 9)).toEqual({ admitted: false, reason: 'below-session-observed' })
   })
 })

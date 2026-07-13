@@ -51,6 +51,19 @@ export type AdmissionDecision =
   | { admitted: true }
   | { admitted: false; reason: AdmissionRejectReason }
 
+export type AuthoritativeVersionRejectReason =
+  | 'missing-version'
+  | 'invalid-version'
+  | 'below-session-observed'
+
+export type AuthoritativeVersionDecision =
+  | { admitted: true; version: number }
+  | { admitted: false; reason: AuthoritativeVersionRejectReason }
+
+export type AuthoritativeMetadataDecision =
+  | { admitted: true; version: number; validatedAt: number }
+  | { admitted: false; reason: AuthoritativeVersionRejectReason | 'missing-validated-at' | 'invalid-validated-at' }
+
 function isFiniteNonNegative(value: number): boolean {
   return Number.isFinite(value) && value >= 0
 }
@@ -105,4 +118,50 @@ export function observeVersion(previousObserved: number, returnedVersion: number
     throw new Error('observed versions must be finite non-negative numbers')
   }
   return Math.max(previousObserved, returnedVersion)
+}
+
+/**
+ * Validate version metadata from the authoritative read path.
+ *
+ * The origin is authoritative for ordering, but an intermediary cache or lagging
+ * replica can still return an older response. A session that has already observed
+ * a newer version must reject that regression rather than silently serving it.
+ */
+export function admitAuthoritativeVersion(
+  rawVersion: string | null,
+  sessionObservedVersion: number
+): AuthoritativeVersionDecision {
+  if (rawVersion === null || rawVersion.trim() === '') {
+    return { admitted: false, reason: 'missing-version' }
+  }
+  if (!isFiniteNonNegative(sessionObservedVersion)) {
+    return { admitted: false, reason: 'invalid-version' }
+  }
+
+  const version = Number(rawVersion)
+  if (!Number.isSafeInteger(version) || version < 1) {
+    return { admitted: false, reason: 'invalid-version' }
+  }
+  if (version < sessionObservedVersion) {
+    return { admitted: false, reason: 'below-session-observed' }
+  }
+
+  return { admitted: true, version }
+}
+
+export function admitAuthoritativeMetadata(
+  rawVersion: string | null,
+  rawValidatedAt: string | null,
+  sessionObservedVersion: number
+): AuthoritativeMetadataDecision {
+  const version = admitAuthoritativeVersion(rawVersion, sessionObservedVersion)
+  if (!version.admitted) return version
+  if (rawValidatedAt === null || rawValidatedAt.trim() === '') {
+    return { admitted: false, reason: 'missing-validated-at' }
+  }
+  const validatedAt = Number(rawValidatedAt)
+  if (!Number.isSafeInteger(validatedAt) || validatedAt <= 0) {
+    return { admitted: false, reason: 'invalid-validated-at' }
+  }
+  return { admitted: true, version: version.version, validatedAt }
 }

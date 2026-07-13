@@ -33,8 +33,8 @@ export async function importKey(rawBytes: Uint8Array): Promise<CryptoKey> {
  * Server encryption and Service Worker decryption must use identical bytes.
  * The version prefix lets a future format migrate without ambiguity.
  */
-export function buildPayloadAad(key: string, seq: number, keyId: string): Uint8Array {
-  return new TextEncoder().encode(`nodex:v1|${key}|${seq}|${keyId}`)
+export function buildPayloadAad(key: string, seq: number, keyId: string, validatedAt: number): Uint8Array {
+  return new TextEncoder().encode(`nodex:v2|${key}|${seq}|${keyId}|${validatedAt}`)
 }
 
 /**

@@ -35,7 +35,12 @@ import {
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { buildPayloadAad, decrypt as aesDecode } from '../crypto/crypto.js'
 import { computeScore, classifyTier, deriveTTL } from '../volatility/volatility.js'
-import { admitCandidate, observeVersion, type ConsistencyPolicy } from '../shared/consistency.js'
+import {
+  admitAuthoritativeMetadata,
+  admitCandidate,
+  observeVersion,
+  type ConsistencyPolicy,
+} from '../shared/consistency.js'
 
 declare const self: ServiceWorkerGlobalScope
 
@@ -79,6 +84,10 @@ async function ensureSessionKey(keyId: string): Promise<CryptoKey | null> {
 async function decryptPayloadResponse(key: string, response: Response, seq: number): Promise<Response> {
   const iv = response.headers.get('X-Nodex-Iv')
   const keyId = response.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
+  const validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
+  if (!Number.isSafeInteger(validatedAt) || validatedAt <= 0) {
+    return new Response('Invalid authoritative freshness metadata', { status: 502 })
+  }
   if (!iv) {
     return response
   }
@@ -93,7 +102,7 @@ async function decryptPayloadResponse(key: string, response: Response, seq: numb
     const ciphertext = await response.text()
     const ctBytes = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0))
     const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0))
-    const plaintext = await aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, seq, keyId))
+    const plaintext = await aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, seq, keyId, validatedAt))
     return new Response(new TextDecoder().decode(plaintext), {
       status: response.status,
       statusText: response.statusText,
@@ -420,19 +429,25 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           }
           const iv = cached.headers.get('X-Nodex-Iv') ?? ''
           const keyId = cached.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
-          // Read server-issued updatedAt from IDB metadata (epoch ms) for time-staleness enforcement
-          let updatedAt = Date.now()
+          // Read the authenticated server-validation time from IDB for time-staleness enforcement.
+          let validatedAt: number | undefined
           try {
             const db = await getDb()
             const meta = await db.get(META_STORE, key)
-            if (meta?.cached_at) updatedAt = meta.cached_at
+            if (Number.isFinite(meta?.validated_at) && (meta?.validated_at ?? 0) > 0) {
+              validatedAt = meta?.validated_at
+            }
           } catch {
-            // best-effort — falls back to Date.now() which disables time-staleness on receiver
+            // A peer without trustworthy age metadata is not eligible to serve this entry.
+          }
+          if (validatedAt === undefined) {
+            replyPort?.postMessage({ found: false })
+            return
           }
           // Re-serve the encrypted payload as-is (server stores ciphertext; SW never decrypts for peer serve)
           replyPort?.postMessage({
             found: true,
-            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq, updatedAt }),
+            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq, validatedAt }),
           })
         } catch (err) {
           console.warn('[SW] P2P_FETCH_SERVE error:', err)
@@ -498,7 +513,7 @@ async function handleRequest(request: Request): Promise<Response> {
         candidate: {
           key,
           version: cachedSeq,
-          updatedAt: meta.cached_at ?? meta.accessed_at,
+          updatedAt: meta.validated_at as number,
           class: 'fresh-dynamic',
         },
         policy: peerReadsPolicyFromScore(cacheScore),
@@ -598,25 +613,27 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
         event.data.found &&
         event.data.payload
       ) {
-        // Payload is JSON: { ciphertext: base64, iv: base64, keyId: string, seq: number, updatedAt: number }
+        // Payload is JSON: { ciphertext: base64, iv: base64, keyId: string, seq: number, validatedAt: number }
         // CRPT-04: DTLS provides transport encryption; AES-GCM provides payload confidentiality
         // at rest and in peer-to-peer transit (DataChannel content never plaintext in flight)
-        type PeerPayload = { ciphertext: string; iv: string; keyId: string; seq: number; updatedAt: number }
-        let parsed: PeerPayload
+        type PeerPayload = { ciphertext: string; iv: string; keyId: string; seq: number; validatedAt: number }
+        let parsed: Partial<PeerPayload>
         try {
-          parsed = JSON.parse(event.data.payload as string) as PeerPayload
+          parsed = JSON.parse(event.data.payload as string) as Partial<PeerPayload>
         } catch {
           resolve(null)
           return
         }
-        const cryptoKey = await ensureSessionKey(parsed.keyId)
-        if (!cryptoKey) {
+        if (
+          typeof parsed.ciphertext !== 'string' ||
+          typeof parsed.iv !== 'string' ||
+          typeof parsed.keyId !== 'string' ||
+          parsed.keyId.length === 0
+        ) {
           resolve(null)
           return
         }
-        const ctBytes = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0))
-        const ivBytes = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0))
-        if (!isFresh(key, parsed.seq)) {
+        if (typeof parsed.seq !== 'number' || !isFresh(key, parsed.seq)) {
           resolve(null)
           return
         }
@@ -627,7 +644,7 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
           candidate: {
             key,
             version: parsed.seq,
-            updatedAt: typeof parsed.updatedAt === 'number' && parsed.updatedAt > 0 ? parsed.updatedAt : Date.now(),
+            updatedAt: parsed.validatedAt as number,
             class: 'fresh-dynamic',
           },
           policy: peerReadsPolicyFromScore(peerScore),
@@ -641,8 +658,22 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
           resolve(null)
           return
         }
+        const cryptoKey = await ensureSessionKey(parsed.keyId)
+        if (!cryptoKey) {
+          resolve(null)
+          return
+        }
+        let ctBytes: Uint8Array
+        let ivBytes: Uint8Array
+        try {
+          ctBytes = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0))
+          ivBytes = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0))
+        } catch {
+          resolve(null)
+          return
+        }
         // aesDecode throws DOMException(OperationError) on tamper/wrong key → server fallback (CRPT-03)
-        aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, parsed.seq, parsed.keyId))
+        aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, parsed.seq, parsed.keyId, parsed.validatedAt as number))
           .then(async (plaintext: Uint8Array) => {
             const currentScore = scoreCache.get(key) ?? VOL_COLD_START
             const tier = classifyTier(currentScore)
@@ -656,10 +687,12 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
                   'X-Nodex-Seq': String(parsed.seq),
                   'X-Nodex-Iv': parsed.iv,
                   'X-Nodex-Key-Id': parsed.keyId,
+                  'X-Nodex-Validated-At': String(parsed.validatedAt),
                 },
               }),
               parsed.seq,
-              ttl_ms
+              ttl_ms,
+              parsed.validatedAt
             )
             updateSeq(key, parsed.seq)
             // Update obs_s barrier after successful peer-fetch (monotone advance)
@@ -705,31 +738,67 @@ async function fetchAndCache(
   key: string,
   start: number
 ): Promise<Response> {
-  let response: Response
+  const observedVersion = observedVersionMap.get(key) ?? 0
+  let response: Response | null = null
+  let seq = 0
+  let validatedAt = 0
 
-  try {
-    response = await fetch(request.url, { mode: 'cors' })
-  } catch (err) {
-    console.error('[SW] Network fetch failed:', err)
-    return new Response('Network error', { status: 502 })
+  // A CDN or lagging replica can return an older value even on the server path.
+  // Retry once with browser HTTP caching disabled, then fail closed rather than
+  // violate the session's monotonic-read barrier.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const originRequest = attempt === 0
+        ? request
+        : new Request(request, { cache: 'no-store' })
+      response = await fetch(originRequest)
+    } catch (err) {
+      console.error('[SW] Network fetch failed:', err)
+      return new Response('Network error', { status: 502 })
+    }
+
+    if (!response.ok) {
+      console.warn('[SW] Server returned non-ok status:', response.status, 'for', key)
+      return response
+    }
+    if (response.type === 'opaque') {
+      console.warn('[SW] Opaque response cannot prove version for:', key)
+      return new Response('Authoritative version unavailable', { status: 503 })
+    }
+
+    const versionDecision = admitAuthoritativeMetadata(
+      response.headers.get('X-Nodex-Seq'),
+      response.headers.get('X-Nodex-Validated-At'),
+      observedVersion
+    )
+    if (versionDecision.admitted) {
+      seq = versionDecision.version
+      validatedAt = versionDecision.validatedAt
+      break
+    }
+
+    const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
+    void emitMetric({
+      type: 'admission-rejected',
+      key,
+      latency_ms,
+      rejection_reason: versionDecision.reason,
+      rejection_source: 'server',
+    })
+    console.warn(
+      '[SW] authoritative version rejected:',
+      key,
+      'reason=', versionDecision.reason,
+      'observed=', observedVersion,
+      'attempt=', attempt + 1
+    )
   }
 
-  if (!response.ok) {
-    console.warn('[SW] Server returned non-ok status:', response.status, 'for', key)
-    return response
-  }
-
-  // Guard: opaque responses cannot be read for X-Nodex-Seq — skip caching (T-02-02)
-  if (response.type === 'opaque') {
-    console.warn('[SW] Opaque response — skipping cache for:', key)
-    return response
-  }
-
-  // Parse X-Nodex-Seq with NaN guard (T-02-01)
-  const rawSeq = response.headers.get('X-Nodex-Seq')
-  let seq = rawSeq ? parseInt(rawSeq, 10) : 1
-  if (isNaN(seq) || seq < 1) {
-    seq = 1
+  if (!response || seq === 0 || validatedAt === 0) {
+    return new Response('Fresh authoritative version unavailable', {
+      status: 503,
+      headers: { 'Retry-After': '1', 'X-Nodex-Min-Version': String(observedVersion) },
+    })
   }
 
   // Derive TTL from current volatility score and pass to putCachedEntry (CR-02)
@@ -739,7 +808,7 @@ async function fetchAndCache(
   const ttl_ms = deriveTTL(tier)
 
   // Store in Cache Storage + IDB via cache.ts (handles LRU eviction, response.clone())
-  await putCachedEntry(key, response, seq, ttl_ms)
+  await putCachedEntry(key, response, seq, ttl_ms, validatedAt)
 
   // Update in-memory seq map (self-seeding — D-09)
   updateSeq(key, seq)

@@ -92,7 +92,7 @@ export async function emitMetric(partial: {
   key: string
   latency_ms: number
   rejection_reason?: string
-  rejection_source?: 'cache' | 'peer'
+  rejection_source?: 'cache' | 'peer' | 'server'
 }): Promise<void> {
   const event: MetricsEvent = {
     schema_version: 1,

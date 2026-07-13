@@ -41,6 +41,7 @@ function betaAuthEnforced(): boolean {
 
 // In-memory sequence counter — exported for test access (per D-10 and CONTEXT.md specifics)
 export const seqCounters = new Map<string, number>()
+const seqUpdatedAt = new Map<string, number>()
 
 // AES-GCM-256 key initialization — generated once per server startup
 let encryptionKey: CryptoKey
@@ -80,8 +81,19 @@ app.get('/api/products/:id', async (c) => {
   const path = `/api/products/${id}`
   if (!seqCounters.has(path)) {
     seqCounters.set(path, 1)
+    seqUpdatedAt.set(path, Date.now())
   }
-  const seq = seqCounters.get(path)!
+  const currentSeq = seqCounters.get(path)!
+  // Local fault-injection hook for browser consistency tests. Production always
+  // uses the real counter and cannot be influenced by this query parameter.
+  const injectedSeq = process.env['NODE_ENV'] !== 'production'
+    ? Number(c.req.query('__nodex_test_seq'))
+    : Number.NaN
+  const seq = Number.isSafeInteger(injectedSeq) && injectedSeq > 0
+    ? injectedSeq
+    : currentSeq
+  const updatedAt = seqUpdatedAt.get(path) ?? Date.now()
+  const validatedAt = Date.now()
 
   await cryptoReady
 
@@ -89,7 +101,7 @@ app.get('/api/products/:id', async (c) => {
   const contentHash = createHash('sha256').update(jsonBody).digest('hex')
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: buildPayloadAad(path, seq, ENCRYPTION_KEY_ID) },
+    { name: 'AES-GCM', iv, additionalData: buildPayloadAad(path, seq, ENCRYPTION_KEY_ID, validatedAt) },
     encryptionKey,
     new TextEncoder().encode(jsonBody)
   )
@@ -102,7 +114,8 @@ app.get('/api/products/:id', async (c) => {
     'X-Nodex-Iv': ivBase64,
     'X-Nodex-Key-Id': ENCRYPTION_KEY_ID,
     'X-Nodex-Version': String(seq),
-    'X-Nodex-Updated-At': String(Date.now()),
+    'X-Nodex-Updated-At': String(updatedAt),
+    'X-Nodex-Validated-At': String(validatedAt),
     'X-Nodex-Policy': 'bounded-staleness',
     'X-Nodex-Max-Stale-Versions': '2',
     'X-Nodex-Max-Stale-Ms': '5000',
@@ -118,6 +131,7 @@ app.post('/api/invalidate/:path{.+$}', (c) => {
   const current = seqCounters.get(path) ?? 1
   const newSeq = current + 1
   seqCounters.set(path, newSeq)
+  seqUpdatedAt.set(path, Date.now())
   return c.json({ path, newSeq })
 })
 
@@ -144,6 +158,7 @@ app.post('/api/write/:path{.+$}', async (c) => {
     return c.json({ error: 'conflict', currentVersion, baseVersion: body.baseVersion }, 409)
   }
   seqCounters.set(path, currentVersion + 1)
+  seqUpdatedAt.set(path, Date.now())
   return c.json({ version: currentVersion + 1, path }, 200)
 })
 

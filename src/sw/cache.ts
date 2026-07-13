@@ -144,7 +144,8 @@ export async function putCachedEntry(
   key: string,
   response: Response,
   seq: number,
-  ttl_ms?: number
+  ttl_ms?: number,
+  validated_at?: number
 ): Promise<void> {
   // Ephemeral keys (TTL = 0ms) must not be cached — skip write entirely (CR-02)
   if (ttl_ms === 0) {
@@ -208,6 +209,7 @@ export async function putCachedEntry(
       accessed_at: now,
       byte_size: byteSize,
       ...(ttl_ms !== undefined ? { ttl_ms, cached_at: now } : {}),
+      ...(validated_at !== undefined ? { validated_at } : {}),
     }
     await db.put(META_STORE, meta)
   } catch (err) {

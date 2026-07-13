@@ -18,7 +18,7 @@ export interface MetricsEvent {
   hop_count?: number       // number of hops from origin (GOSSIP_TTL - msg.ttl)
   // Consistency admission gate — populated when type='admission-rejected'
   rejection_reason?: string  // AdmissionRejectReason from consistency.ts
-  rejection_source?: 'cache' | 'peer'  // which read path triggered the rejection
+  rejection_source?: 'cache' | 'peer' | 'server'  // which read path triggered the rejection
 }
 
 export type CandidatePathType = 'host' | 'srflx' | 'relay' | 'unknown'
@@ -67,6 +67,7 @@ export interface CacheMeta {
   byte_size: number        // estimated response body bytes
   ttl_ms?: number          // optional TTL in ms derived from volatility tier; 0 = no caching; absent = no expiry
   cached_at?: number       // epoch ms when the entry was written; paired with ttl_ms for expiry check
+  validated_at?: number    // server freshness-proof timestamp; authenticated in payload AAD
 }
 
 export interface VolatilityEntry {

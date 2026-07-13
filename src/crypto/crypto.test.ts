@@ -48,11 +48,19 @@ describe('encrypt / decrypt round-trip', () => {
   it('decrypt rejects when authenticated metadata changes', async () => {
     const key = await importKey(randomKeyBytes())
     const plaintext = encode('freshness-bound')
-    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default'))
+    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default', 1000))
 
     await expect(
-      decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 2, 'default'))
+      decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 2, 'default', 1000))
     ).rejects.toBeInstanceOf(DOMException)
+  })
+
+  it('decrypt rejects when the freshness timestamp is forged', async () => {
+    const key = await importKey(randomKeyBytes())
+    const plaintext = encode('timestamp-bound')
+    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default', 1000))
+    await expect(decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 1, 'default', 2000)))
+      .rejects.toBeInstanceOf(DOMException)
   })
 
   it('two encrypt calls with the same key and plaintext produce different IVs (IV freshness — T-03-04)', async () => {

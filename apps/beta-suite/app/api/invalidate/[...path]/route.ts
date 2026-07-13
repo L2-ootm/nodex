@@ -22,7 +22,7 @@ async function bumpSeq(path: string): Promise<number> {
       if (Number.isInteger(data.seq) && data.seq > 0) seq = data.seq + 1
     }
   } catch { /* not found — start at 1 */ }
-  await put(blobKey, JSON.stringify({ seq }), {
+  await put(blobKey, JSON.stringify({ seq, updatedAt: Date.now() }), {
     access: 'private',
     allowOverwrite: true,
     contentType: 'application/json',

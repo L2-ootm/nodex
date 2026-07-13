@@ -23,18 +23,23 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer
 }
 
-async function getSeq(path: string): Promise<number> {
-  if (!process.env['BLOB_READ_WRITE_TOKEN']) return 1
+async function getSeq(path: string): Promise<{ seq: number; updatedAt: number }> {
+  if (!process.env['BLOB_READ_WRITE_TOKEN']) return { seq: 1, updatedAt: Date.now() }
   const blobKey = `nodex-seq/${path.replace(/\//g, '_')}.json`
   try {
     const blob = await get(blobKey, { access: 'private', useCache: false })
     if (blob?.stream) {
       const text = await new Response(blob.stream).text()
-      const data = JSON.parse(text) as { seq: number }
-      return Number.isInteger(data.seq) && data.seq > 0 ? data.seq : 1
+      const data = JSON.parse(text) as { seq: number; updatedAt?: number }
+      if (Number.isInteger(data.seq) && data.seq > 0) {
+        return {
+          seq: data.seq,
+          updatedAt: Number.isSafeInteger(data.updatedAt) && (data.updatedAt ?? 0) > 0 ? data.updatedAt! : Date.now(),
+        }
+      }
     }
   } catch { /* not found */ }
-  return 1
+  return { seq: 1, updatedAt: Date.now() }
 }
 
 async function logCapture(path: string, seq: number, ivB64: string, ctSample: string): Promise<void> {
@@ -66,7 +71,7 @@ async function logCapture(path: string, seq: number, ivB64: string, ctSample: st
 const app = new Hono()
 app.use('*', cors({
   origin: '*',
-  exposeHeaders: ['X-Nodex-Seq', 'X-Nodex-Iv', 'X-Nodex-Key-Id'],
+  exposeHeaders: ['X-Nodex-Seq', 'X-Nodex-Iv', 'X-Nodex-Key-Id', 'X-Nodex-Updated-At', 'X-Nodex-Validated-At'],
 }))
 
 app.get('/api/products/:id', async (c) => {
@@ -74,7 +79,8 @@ app.get('/api/products/:id', async (c) => {
   if (!/^\d+$/.test(id)) return c.json({ error: 'invalid product id' }, 400)
 
   const path = `/api/products/${id}`
-  const seq = await getSeq(path)
+  const { seq, updatedAt } = await getSeq(path)
+  const validatedAt = Date.now()
 
   const keyBytes = getSessionKeyBytes()
   const cryptoKey = await globalThis.crypto.subtle.importKey(
@@ -83,7 +89,7 @@ app.get('/api/products/:id', async (c) => {
 
   const plaintext = JSON.stringify({ id, name: `Product ${id}`, price: 9.99, seq })
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
-  const aad = buildPayloadAad(path, seq, ENCRYPTION_KEY_ID)
+  const aad = buildPayloadAad(path, seq, ENCRYPTION_KEY_ID, validatedAt)
 
   const ciphertext = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(aad) },
@@ -102,6 +108,8 @@ app.get('/api/products/:id', async (c) => {
     'X-Nodex-Seq': String(seq),
     'X-Nodex-Iv': ivB64,
     'X-Nodex-Key-Id': ENCRYPTION_KEY_ID,
+    'X-Nodex-Updated-At': String(updatedAt),
+    'X-Nodex-Validated-At': String(validatedAt),
   })
 })
 
