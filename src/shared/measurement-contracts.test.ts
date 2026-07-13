@@ -101,6 +101,13 @@ describe('measurement event contracts', () => {
     expect(() => assertMeasurementEvent({ ...coverage, missing_by_stage: { token: 1 } })).toThrow('sensitive/raw field')
   })
 
+  it('rejects sensitive values hidden inside allowed fields', () => {
+    const read = events[1]
+    expect(() => assertMeasurementEvent({ ...read, object_class: 'https://private.example/data' })).toThrow('sensitive/raw value')
+    expect(() => assertMeasurementEvent({ ...read, region_coarse: 'Bearer secret-value' })).toThrow('sensitive/raw value')
+    expect(() => assertMeasurementEvent({ ...read, admission_reason: 'a=candidate:1 1 udp 1 192.0.2.1 999 typ host' })).toThrow('sensitive/raw value')
+  })
+
   it('names malformed JSON and preserves the event discriminator', () => {
     expect(() => parseMeasurementEventJson('{nope', 'bad-event.json')).toThrow('bad-event.json: malformed JSON')
     expect(parseMeasurementEventJson(JSON.stringify(events[2])).event_type).toBe('shadow_decision')

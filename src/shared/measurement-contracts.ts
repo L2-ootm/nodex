@@ -191,6 +191,14 @@ const COMMON_OPTIONAL = [
 ] as const
 
 const SENSITIVE_FIELD = /^(?:ip|ip_address|sdp|token|authorization|secret|password|credential|email|url|full_url|user_agent|tenant_id|user_id|device_id|payload|content)$/i
+const SENSITIVE_VALUE_PATTERNS = [
+  /https?:\/\//i,
+  /\bBearer\s+\S+/i,
+  /(?:^|[?&])(?:token|api[_-]?key|session[_-]?key)=/i,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+  /(?:^|\n)(?:v=0|a=candidate:)/i,
+  /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/,
+] as const
 const commitPattern = /^[0-9a-f]{7,64}$/i
 const digestPattern = /^[0-9a-f]{64}$/i
 const reasonPattern = /^[a-z][a-z0-9_-]{2,63}$/i
@@ -214,6 +222,10 @@ function assertAllowedKeys(value: JsonRecord, required: readonly string[], optio
 }
 
 function assertNoSensitiveFields(value: unknown, path = '$', seen = new Set<unknown>()): void {
+  if (typeof value === 'string') {
+    if (SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(value))) fail(path, 'sensitive/raw value is forbidden')
+    return
+  }
   if (!value || typeof value !== 'object' || seen.has(value)) return
   seen.add(value)
   if (Array.isArray(value)) {
