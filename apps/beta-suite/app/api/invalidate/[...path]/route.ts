@@ -1,5 +1,9 @@
 import { type NextRequest, NextResponse } from 'next/server'
-import { put, get } from '@vercel/blob'
+import {
+  SequenceAuthorityInputError,
+  type SequenceBump,
+} from '../../../../../../src/server/sequence-authority'
+import { getSequenceAuthority } from '../../../../../../src/server/sequence-authority-provider'
 
 function validateAdminToken(req: NextRequest): boolean {
   const header = req.headers.get('Authorization') ?? ''
@@ -10,34 +14,14 @@ function validateAdminToken(req: NextRequest): boolean {
   return admins.includes(token)
 }
 
-async function bumpSeq(path: string): Promise<number> {
-  if (!process.env['BLOB_READ_WRITE_TOKEN']) return 1
-  const blobKey = `nodex-seq/${path.replace(/\//g, '_')}.json`
-  let seq = 1
-  try {
-    const blob = await get(blobKey, { access: 'private', useCache: false })
-    if (blob?.stream) {
-      const text = await new Response(blob.stream).text()
-      const data = JSON.parse(text) as { seq: number }
-      if (Number.isInteger(data.seq) && data.seq > 0) seq = data.seq + 1
-    }
-  } catch { /* not found — start at 1 */ }
-  await put(blobKey, JSON.stringify({ seq, updatedAt: Date.now() }), {
-    access: 'private',
-    allowOverwrite: true,
-    contentType: 'application/json',
-  })
-  return seq
-}
-
-async function notifySignaling(path: string, seq: number): Promise<void> {
+async function notifySignaling(path: string, seq: number, eventId: string): Promise<void> {
   const signalingUrl = process.env['NODEX_BETA_SIGNALING_HTTP_URL']
   if (!signalingUrl) return
   try {
     await fetch(`${signalingUrl}/gossip-seed`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: path, seq, originNodeId: 'server' }),
+      body: JSON.stringify({ key: path, seq, eventId, originNodeId: 'server' }),
       signal: AbortSignal.timeout(3000),
     })
   } catch { /* signaling offline — gossip propagates on next peer contact */ }
@@ -54,9 +38,28 @@ export async function POST(
   const wildcardPath = '/' + path.join('/')
   if (wildcardPath === '/') return NextResponse.json({ error: 'path required' }, { status: 400 })
   const apiPath = `/api${wildcardPath}`
-  const seq = await bumpSeq(apiPath)
-  void notifySignaling(apiPath, seq)
-  return NextResponse.json({ path: apiPath, seq, invalidated: true })
+  const idempotencyKey = req.headers.get('Idempotency-Key') ?? ''
+  let bump: SequenceBump
+  try {
+    bump = await getSequenceAuthority().bump(apiPath, idempotencyKey)
+  } catch (error) {
+    if (error instanceof SequenceAuthorityInputError) {
+      return NextResponse.json({ error: 'invalid invalidation command' }, { status: 400 })
+    }
+    return NextResponse.json(
+      { error: 'sequence authority unavailable' },
+      { status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '1' } },
+    )
+  }
+  void notifySignaling(apiPath, bump.seq, bump.eventId)
+  return NextResponse.json({
+    path: apiPath,
+    seq: bump.seq,
+    updatedAt: bump.updatedAt,
+    eventId: bump.eventId,
+    duplicate: bump.duplicate,
+    invalidated: true,
+  }, { headers: { 'Cache-Control': 'no-store' } })
 }
 
 export function OPTIONS(): NextResponse {
@@ -65,7 +68,7 @@ export function OPTIONS(): NextResponse {
     headers: {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key',
     },
   })
 }

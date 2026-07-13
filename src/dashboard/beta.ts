@@ -914,7 +914,10 @@ async function runRealTest(): Promise<void> {
   // Trigger server-side cache invalidation → gossip epidemic
   addSimpleLog('Triggering gossip invalidation via /api/invalidate/products/1…', 'info')
   try {
-    const invRes = await fetch('/api/invalidate/products/1', { method: 'POST' })
+    const invRes = await fetch('/api/invalidate/products/1', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    })
     if (invRes.ok) {
       const data = await invRes.json() as { seq: number }
       addEvent('Invalidation seeded.', { seq: data.seq })

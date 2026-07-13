@@ -398,7 +398,10 @@ export function RunPage() {
       setStep(4)
       record(`Metrics captured: SW ${counts.swCache}, P2P ${counts.peerFetch}, server ${counts.serverFallback}; peers ${peerCount}.`)
 
-      const invalidate = await runtimeWindow.fetch('/api/invalidate/products/1', { method: 'POST' })
+      const invalidate = await runtimeWindow.fetch('/api/invalidate/products/1', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+      })
       if (invalidate.ok) {
         const body = await invalidate.json() as { seq?: number; newSeq?: number }
         const seq = body.seq ?? body.newSeq ?? 1

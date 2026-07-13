@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
+import { SequenceAuthorityInputError, SequenceAuthorityUnavailableError } from './sequence-authority.js'
 import {
-  createSequenceAuthorityFromEnv,
-  SequenceAuthorityInputError,
-  SequenceAuthorityUnavailableError,
+  createSupabaseSequenceAuthority,
   SupabaseSequenceAuthority,
   type SequenceRpcClient,
-} from './sequence-authority.js'
+} from './supabase-sequence-authority.js'
 
 const tenantId = '018f5b79-24c1-7a63-abfd-46a8c5ae23e7'
 
@@ -13,7 +12,7 @@ function clientResult(data: unknown, error: { message?: string } | null = null):
   return { rpc: vi.fn().mockResolvedValue({ data, error }) }
 }
 
-describe('SupabaseSequenceAuthority', () => {
+describe('SupabaseSequenceAuthority adapter', () => {
   it('reads a strict tenant-scoped sequence record', async () => {
     const client = clientResult([{ seq: '7', updated_at: '2026-07-13T18:00:00.000Z' }])
     const authority = new SupabaseSequenceAuthority(client, tenantId)
@@ -77,9 +76,9 @@ describe('SupabaseSequenceAuthority', () => {
     await expect(authority.read('/api/products/1')).rejects.toBeInstanceOf(SequenceAuthorityUnavailableError)
   })
 
-  it('requires server-owned tenant and service-role configuration', () => {
-    expect(() => createSequenceAuthorityFromEnv({})).toThrow(SequenceAuthorityUnavailableError)
-    expect(() => createSequenceAuthorityFromEnv({
+  it('requires server-owned tenant and secret configuration', () => {
+    expect(() => createSupabaseSequenceAuthority({})).toThrow(SequenceAuthorityUnavailableError)
+    expect(() => createSupabaseSequenceAuthority({
       SUPABASE_URL: 'https://example.supabase.co',
       SUPABASE_SECRET_KEY: 'secret-key',
     })).toThrow(SequenceAuthorityUnavailableError)

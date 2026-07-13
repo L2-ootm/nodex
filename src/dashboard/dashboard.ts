@@ -599,14 +599,17 @@ if (typeof document !== 'undefined') {
       if (invalidateBtn) invalidateBtn.disabled = true
       if (invalidateResult) invalidateResult.textContent = ''
 
-      fetch(url, { method: 'POST' })
+      fetch(url, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
+      })
         .then((res) => {
           if (!res.ok) throw new Error(`HTTP ${res.status}`)
-          return res.json() as Promise<{ path: string; newSeq: number }>
+          return res.json() as Promise<{ path: string; seq?: number; newSeq?: number }>
         })
         .then((data) => {
           if (invalidateResult) {
-            invalidateResult.textContent = `Sequence bumped to ${data.newSeq}`
+            invalidateResult.textContent = `Sequence bumped to ${data.seq ?? data.newSeq ?? 'unknown'}`
             setTimeout(() => {
               if (invalidateResult) invalidateResult.textContent = ''
             }, 3000)
