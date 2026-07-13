@@ -11,6 +11,10 @@ describe('mock-api', () => {
     seqCounters.clear()
   })
 
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it('Test 1: GET /api/products/1 returns status 200', async () => {
     const res = await app.request('/api/products/1')
     expect(res.status).toBe(200)
@@ -35,12 +39,34 @@ describe('mock-api', () => {
   })
 
   it('Test 4: GET /api/__test__/seq/api/products/1 returns { path: "/api/products/1", seq: 2 } after invalidate', async () => {
+    vi.stubEnv('NODEX_ENABLE_TEST_FAULTS', 'true')
     await app.request('/api/products/1')
     await app.request('/api/invalidate/api/products/1', { method: 'POST' })
     const res = await app.request('/api/__test__/seq/api/products/1')
     const body = await res.json() as { path: string; seq: number }
     expect(body.path).toBe('/api/products/1')
     expect(body.seq).toBe(2)
+  })
+
+  it('ignores sequence fault injection unless explicitly enabled', async () => {
+    const res = await app.request('/api/products/1?__nodex_test_seq=99')
+    expect(res.headers.get('X-Nodex-Seq')).toBe('1')
+    expect((await app.request('/api/__test__/seq/api/products/1')).status).toBe(404)
+  })
+
+  it('keeps test faults disabled in production even if the flag is set', async () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('NODEX_ENABLE_TEST_FAULTS', 'true')
+    const res = await app.request('/api/products/1?__nodex_test_seq=99')
+    expect(res.headers.get('X-Nodex-Seq')).toBe('1')
+    expect((await app.request('/api/__test__/seq/api/products/1')).status).toBe(404)
+  })
+
+  it('allows sequence fault injection only with the explicit test flag', async () => {
+    vi.stubEnv('NODEX_ENABLE_TEST_FAULTS', 'true')
+    const res = await app.request('/api/products/1?__nodex_test_seq=99')
+    expect(res.headers.get('X-Nodex-Seq')).toBe('99')
+    expect((await app.request('/api/__test__/seq/api/products/1')).status).toBe(200)
   })
 
   it('Test 5: exported seqCounters Map contains "/api/products/1" with value 2 after full sequence', async () => {

@@ -23,23 +23,34 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer
 }
 
-async function getSeq(path: string): Promise<{ seq: number; updatedAt: number }> {
-  if (!process.env['BLOB_READ_WRITE_TOKEN']) return { seq: 1, updatedAt: Date.now() }
+export class SequenceAuthorityUnavailableError extends Error {
+  constructor() {
+    super('sequence authority unavailable')
+    this.name = 'SequenceAuthorityUnavailableError'
+  }
+}
+
+export async function getSeq(path: string): Promise<{ seq: number; updatedAt: number }> {
+  if (!process.env['BLOB_READ_WRITE_TOKEN']) throw new SequenceAuthorityUnavailableError()
   const blobKey = `nodex-seq/${path.replace(/\//g, '_')}.json`
   try {
     const blob = await get(blobKey, { access: 'private', useCache: false })
-    if (blob?.stream) {
-      const text = await new Response(blob.stream).text()
-      const data = JSON.parse(text) as { seq: number; updatedAt?: number }
-      if (Number.isInteger(data.seq) && data.seq > 0) {
-        return {
-          seq: data.seq,
-          updatedAt: Number.isSafeInteger(data.updatedAt) && (data.updatedAt ?? 0) > 0 ? data.updatedAt! : Date.now(),
-        }
-      }
+    if (!blob?.stream) throw new SequenceAuthorityUnavailableError()
+    const text = await new Response(blob.stream).text()
+    const data = JSON.parse(text) as { seq?: unknown; updatedAt?: unknown }
+    if (
+      !Number.isSafeInteger(data.seq) ||
+      (data.seq as number) <= 0 ||
+      !Number.isSafeInteger(data.updatedAt) ||
+      (data.updatedAt as number) <= 0
+    ) {
+      throw new SequenceAuthorityUnavailableError()
     }
-  } catch { /* not found */ }
-  return { seq: 1, updatedAt: Date.now() }
+    return { seq: data.seq as number, updatedAt: data.updatedAt as number }
+  } catch (error) {
+    if (error instanceof SequenceAuthorityUnavailableError) throw error
+    throw new SequenceAuthorityUnavailableError()
+  }
 }
 
 async function logCapture(path: string, seq: number, ivB64: string, ctSample: string): Promise<void> {
@@ -68,7 +79,7 @@ async function logCapture(path: string, seq: number, ivB64: string, ctSample: st
   })
 }
 
-const app = new Hono()
+export const app = new Hono()
 app.use('*', cors({
   origin: '*',
   exposeHeaders: ['X-Nodex-Seq', 'X-Nodex-Iv', 'X-Nodex-Key-Id', 'X-Nodex-Updated-At', 'X-Nodex-Validated-At'],
@@ -79,7 +90,19 @@ app.get('/api/products/:id', async (c) => {
   if (!/^\d+$/.test(id)) return c.json({ error: 'invalid product id' }, 400)
 
   const path = `/api/products/${id}`
-  const { seq, updatedAt } = await getSeq(path)
+  let authority: { seq: number; updatedAt: number }
+  try {
+    authority = await getSeq(path)
+  } catch (error) {
+    if (error instanceof SequenceAuthorityUnavailableError) {
+      return c.body('Sequence authority unavailable', 503, {
+        'Cache-Control': 'no-store',
+        'Retry-After': '1',
+      })
+    }
+    throw error
+  }
+  const { seq, updatedAt } = authority
   const validatedAt = Date.now()
 
   const keyBytes = getSessionKeyBytes()

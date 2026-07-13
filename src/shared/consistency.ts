@@ -13,12 +13,15 @@ export const NODEX_DATA_CLASSES = [
 
 export type NodexDataClass = typeof NODEX_DATA_CLASSES[number]
 
+export const DEFAULT_MAX_FUTURE_CLOCK_SKEW_MS = 30_000
+
 export type AdmissionRejectReason =
   | 'missing-policy'
   | 'class-forbidden'
   | 'below-session-observed'
   | 'beyond-version-staleness'
   | 'beyond-time-staleness'
+  | 'timestamp-in-future'
   | 'hash-invalid'
   | 'invalid-candidate'
 
@@ -35,6 +38,7 @@ export interface ConsistencyPolicy {
   peerReads: boolean
   maxStaleVersions?: number
   maxStaleMs?: number
+  maxFutureClockSkewMs?: number
   requireHash?: boolean
 }
 
@@ -62,7 +66,12 @@ export type AuthoritativeVersionDecision =
 
 export type AuthoritativeMetadataDecision =
   | { admitted: true; version: number; validatedAt: number }
-  | { admitted: false; reason: AuthoritativeVersionRejectReason | 'missing-validated-at' | 'invalid-validated-at' }
+  | { admitted: false; reason: AuthoritativeVersionRejectReason | 'missing-validated-at' | 'invalid-validated-at' | 'validated-at-in-future' }
+
+export interface AuthoritativeClockOptions {
+  now?: number
+  maxFutureClockSkewMs?: number
+}
 
 function isFiniteNonNegative(value: number): boolean {
   return Number.isFinite(value) && value >= 0
@@ -104,6 +113,14 @@ export function admitCandidate(input: AdmissionInput): AdmissionDecision {
     input.now - candidate.updatedAt > policy.maxStaleMs
   ) {
     return { admitted: false, reason: 'beyond-time-staleness' }
+  }
+
+  const maxFutureClockSkewMs = policy.maxFutureClockSkewMs ?? DEFAULT_MAX_FUTURE_CLOCK_SKEW_MS
+  if (
+    !isFiniteNonNegative(maxFutureClockSkewMs) ||
+    candidate.updatedAt > input.now + maxFutureClockSkewMs
+  ) {
+    return { admitted: false, reason: 'timestamp-in-future' }
   }
 
   if (policy.requireHash && (!candidate.hash || input.verifyHash?.(candidate) !== true)) {
@@ -152,7 +169,8 @@ export function admitAuthoritativeVersion(
 export function admitAuthoritativeMetadata(
   rawVersion: string | null,
   rawValidatedAt: string | null,
-  sessionObservedVersion: number
+  sessionObservedVersion: number,
+  clock: AuthoritativeClockOptions = {}
 ): AuthoritativeMetadataDecision {
   const version = admitAuthoritativeVersion(rawVersion, sessionObservedVersion)
   if (!version.admitted) return version
@@ -162,6 +180,15 @@ export function admitAuthoritativeMetadata(
   const validatedAt = Number(rawValidatedAt)
   if (!Number.isSafeInteger(validatedAt) || validatedAt <= 0) {
     return { admitted: false, reason: 'invalid-validated-at' }
+  }
+  const now = clock.now ?? Date.now()
+  const maxFutureClockSkewMs = clock.maxFutureClockSkewMs ?? DEFAULT_MAX_FUTURE_CLOCK_SKEW_MS
+  if (
+    !isFiniteNonNegative(now) ||
+    !isFiniteNonNegative(maxFutureClockSkewMs) ||
+    validatedAt > now + maxFutureClockSkewMs
+  ) {
+    return { admitted: false, reason: 'validated-at-in-future' }
   }
   return { admitted: true, version: version.version, validatedAt }
 }

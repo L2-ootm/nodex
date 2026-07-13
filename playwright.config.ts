@@ -20,7 +20,8 @@ export default defineConfig({
     {
       command: 'npm run server',
       port: 3001,
-      reuseExistingServer: true,
+      reuseExistingServer: false,
+      env: { ...process.env, NODEX_ENABLE_TEST_FAULTS: 'true' },
     },
     {
       // Build first, then serve the built dist/ in preview mode (which includes sw.js).

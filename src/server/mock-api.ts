@@ -39,6 +39,11 @@ function betaAuthEnforced(): boolean {
   return process.env['NODEX_BETA_ENFORCE_AUTH'] === 'true'
 }
 
+function testFaultsEnabled(): boolean {
+  return process.env['NODE_ENV'] !== 'production' &&
+    process.env['NODEX_ENABLE_TEST_FAULTS'] === 'true'
+}
+
 // In-memory sequence counter — exported for test access (per D-10 and CONTEXT.md specifics)
 export const seqCounters = new Map<string, number>()
 const seqUpdatedAt = new Map<string, number>()
@@ -84,9 +89,9 @@ app.get('/api/products/:id', async (c) => {
     seqUpdatedAt.set(path, Date.now())
   }
   const currentSeq = seqCounters.get(path)!
-  // Local fault-injection hook for browser consistency tests. Production always
-  // uses the real counter and cannot be influenced by this query parameter.
-  const injectedSeq = process.env['NODE_ENV'] !== 'production'
+  // Fault injection is opt-in even outside production. NODE_ENV is frequently
+  // unset in previews, so it is not a sufficient security boundary.
+  const injectedSeq = testFaultsEnabled()
     ? Number(c.req.query('__nodex_test_seq'))
     : Number.NaN
   const seq = Number.isSafeInteger(injectedSeq) && injectedSeq > 0
@@ -164,6 +169,7 @@ app.post('/api/write/:path{.+$}', async (c) => {
 
 // GET /api/__test__/seq/:path{.+$} — test introspection endpoint
 app.get('/api/__test__/seq/:path{.+$}', (c) => {
+  if (!testFaultsEnabled()) return c.notFound()
   const path = '/' + c.req.param('path')
   const seq = seqCounters.get(path) ?? 1
   return c.json({ path, seq })

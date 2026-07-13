@@ -81,6 +81,26 @@ describe('admitCandidate', () => {
     })).toEqual({ admitted: false, reason: 'beyond-time-staleness' })
   })
 
+  it('rejects candidate timestamps beyond the clock-skew budget', () => {
+    expect(admitCandidate({
+      candidate: { ...baseCandidate, updatedAt: now + 30_001 },
+      policy: freshPolicy,
+      sessionObservedVersion: 0,
+      latestKnownVersion: 10,
+      now,
+      verifyHash: () => true,
+    })).toEqual({ admitted: false, reason: 'timestamp-in-future' })
+
+    expect(admitCandidate({
+      candidate: { ...baseCandidate, updatedAt: now + 100 },
+      policy: { ...freshPolicy, maxFutureClockSkewMs: 50 },
+      sessionObservedVersion: 0,
+      latestKnownVersion: 10,
+      now,
+      verifyHash: () => true,
+    })).toEqual({ admitted: false, reason: 'timestamp-in-future' })
+  })
+
   it('rejects forbidden and critical classes from peer reads', () => {
     expect(admitCandidate({
       candidate: { ...baseCandidate, class: 'forbidden' },
@@ -181,9 +201,26 @@ describe('admitAuthoritativeVersion', () => {
 
 describe('admitAuthoritativeMetadata', () => {
   it('requires a valid server timestamp alongside a non-regressing version', () => {
-    expect(admitAuthoritativeMetadata('10', '1000000', 9)).toEqual({ admitted: true, version: 10, validatedAt: 1000000 })
-    expect(admitAuthoritativeMetadata('10', null, 9)).toEqual({ admitted: false, reason: 'missing-validated-at' })
-    expect(admitAuthoritativeMetadata('10', 'not-a-time', 9)).toEqual({ admitted: false, reason: 'invalid-validated-at' })
-    expect(admitAuthoritativeMetadata('8', '1000000', 9)).toEqual({ admitted: false, reason: 'below-session-observed' })
+    const clock = { now: 1_000_000 }
+    expect(admitAuthoritativeMetadata('10', '1000000', 9, clock)).toEqual({ admitted: true, version: 10, validatedAt: 1000000 })
+    expect(admitAuthoritativeMetadata('10', null, 9, clock)).toEqual({ admitted: false, reason: 'missing-validated-at' })
+    expect(admitAuthoritativeMetadata('10', 'not-a-time', 9, clock)).toEqual({ admitted: false, reason: 'invalid-validated-at' })
+    expect(admitAuthoritativeMetadata('8', '1000000', 9, clock)).toEqual({ admitted: false, reason: 'below-session-observed' })
+  })
+
+  it('rejects validation timestamps beyond the allowed future clock skew', () => {
+    expect(admitAuthoritativeMetadata('10', '1030000', 9, { now: 1_000_000 })).toEqual({
+      admitted: true,
+      version: 10,
+      validatedAt: 1_030_000,
+    })
+    expect(admitAuthoritativeMetadata('10', '1030001', 9, { now: 1_000_000 })).toEqual({
+      admitted: false,
+      reason: 'validated-at-in-future',
+    })
+    expect(admitAuthoritativeMetadata('10', '1000101', 9, {
+      now: 1_000_000,
+      maxFutureClockSkewMs: 100,
+    })).toEqual({ admitted: false, reason: 'validated-at-in-future' })
   })
 })
