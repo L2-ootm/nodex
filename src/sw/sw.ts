@@ -591,7 +591,7 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
     const timeout = setTimeout(() => resolve(null), P2P_FETCH_TIMEOUT_MS)
 
     // port1 is transferred to page; SW listens on port2 to receive the reply
-    channel.port2.onmessage = (event: MessageEvent) => {
+    channel.port2.onmessage = async (event: MessageEvent) => {
       clearTimeout(timeout)
       if (
         event.data?.type === 'P2P_FETCH_RESPONSE' &&
@@ -609,7 +609,7 @@ async function tryPeerFetch(key: string): Promise<Response | null> {
           resolve(null)
           return
         }
-        const cryptoKey = sessionKeys.get(parsed.keyId)
+        const cryptoKey = await ensureSessionKey(parsed.keyId)
         if (!cryptoKey) {
           resolve(null)
           return

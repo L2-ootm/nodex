@@ -59,7 +59,7 @@ Admin:
 - Room joins emit `/api/beta/logs`, so room activity is saved automatically by the backend store/Supabase path for later analysis.
 - Token management and admin monitoring routes must stay hidden from tester sessions.
 - `/run` must execute the real protocol runtime. It embeds `/metrics.html`, waits for the Service Worker/P2P manager, fetches encrypted `/api/products/*`, seeds gossip through `/api/signal/gossip-seed`, and records SW/P2P/server path counts. Do not replace this with a cosmetic checklist.
-- `/run` also records Page Visibility and browser lifecycle signals (`run-start`, `visibilitychange`, `pagehide`, `pageshow`, `freeze`, `resume`, `protocol-complete`) plus user-agent/device hints. `/evidence` attaches that bundle automatically, defaults solo runs to the `background-tab` topology, and exposes `mobile-browser` as a Phase 7 evidence category.
+- `/run` also records Page Visibility and browser lifecycle signals (`run-start`, `visibilitychange`, `pagehide`, `pageshow`, `freeze`, `resume`, `protocol-complete`) plus user-agent/device hints. `/evidence` attaches that bundle automatically, defaults solo runs to the `same-machine-isolation` topology, and exposes `background-tab` and `mobile-browser` as Phase 7 evidence categories for explicit tester selection.
 - Submitted evidence can include `lifecycleSignals` and `deviceHints`; the beta API persists them in JSONL locally and in Supabase JSONB columns in production.
 
 ## Deployment Notes
@@ -75,7 +75,7 @@ Deploy this app as a preview before changing the `nodex-beta.vercel.app` alias. 
 
 - `npm run beta:next:build` passes;
 - `npm run test:beta-next` passes;
-- `npm run verify:deployed-p2p` passes against the target aliases;
+- `npm run verify:deployed-p2p` passes against the target aliases after the latest runtime/API changes are deployed;
 - preview smoke tests pass against `nodex-beta-api.vercel.app`;
 - tester tokens cannot access admin routes;
 - admin token creation/revoke works in preview.

@@ -311,6 +311,10 @@ app.get('/api/signal/poll', async (c) => {
   const after = Number(c.req.query('after') ?? '0')
   if (!roomId || !nodeId) return c.json({ error: 'roomId and nodeId required' }, 400)
 
+  const state = await readState(roomId)
+  state.nodes[nodeId] = { lastSeen: Date.now() }
+  const peers = activeNodeIds(state, nodeId).slice(-5)
+
   let messages: SignalEnvelope[]
   if (shouldUseSupabaseState()) {
     // Read individual message rows — no write race with concurrent /send calls.
@@ -323,8 +327,7 @@ app.get('/api/signal/poll', async (c) => {
       return !to || to === nodeId
     })
   } else {
-    // In-memory / Blob fallback: read from state blob (no write to avoid race).
-    const state = await readState(roomId)
+    // In-memory / Blob fallback: messages live in the compact room state.
     messages = state.messages.filter((envelope) => {
       if (Number.isFinite(after) && envelope.id <= after) return false
       const msg = envelope.message
@@ -334,8 +337,9 @@ app.get('/api/signal/poll', async (c) => {
       return !to || to === nodeId
     })
   }
+  await writeState(roomId, state)
 
-  return c.json({ messages })
+  return c.json({ messages, peers, polite: peers.length > 0 })
 })
 
 app.post('/api/signal/leave', async (c) => {

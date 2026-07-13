@@ -581,7 +581,19 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
     const pollHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
     fetch(url, { signal, headers: pollHeaders })
       .then((res) => res.ok ? res.json() : null)
-      .then(async (body: { messages?: Array<{ id: number; message: SignalingMessage | GossipMessage }> } | null) => {
+      .then(async (body: {
+        messages?: Array<{ id: number; message: SignalingMessage | GossipMessage }>
+        peers?: string[]
+        polite?: boolean
+      } | null) => {
+        if (body?.peers?.length) {
+          await handleSignalingMessage({
+            type: 'PEERS_LIST',
+            from: 'server',
+            peers: body.peers,
+            polite: Boolean(body.polite),
+          })
+        }
         // Process messages sequentially so ICE candidates are applied after setRemoteDescription.
         // Concurrent dispatch (void promises) allowed ICE to race ahead of OFFER/ANSWER SDP.
         for (const envelope of body?.messages ?? []) {
@@ -864,7 +876,7 @@ async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Pr
   }
 
   const sigMsg = msg as SignalingMessage
-  if (sigMsg.type === 'JOIN_ACK') {
+  if (sigMsg.type === 'JOIN_ACK' || sigMsg.type === 'PEERS_LIST') {
     const peers = sigMsg.peers ?? []
     // peers[0..PEER_FANOUT-1] = local; peers[PEER_FANOUT..PEER_FANOUT+LONG_RANGE_PEER_COUNT-1] = long-range
     for (let i = 0; i < peers.length; i++) {

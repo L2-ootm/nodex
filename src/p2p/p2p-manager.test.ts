@@ -1,17 +1,24 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest'
 import type { PeerFetchResponse } from '../shared/types.js'
 import {
   _resetForTest,
   buildStoragePressureSample,
   candidateTypeFromPair,
+  connections,
   extractPeerTelemetryFromStats,
   pendingRequests,
+  peerManager,
   selectConnectedPeer,
 } from './p2p-manager.js'
 
 describe('p2p-manager', () => {
   beforeEach(() => {
     _resetForTest()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('reqId correlation routes response to correct resolver', () => {
@@ -138,5 +145,120 @@ describe('p2p-manager', () => {
       quota: 0,
       timestamp: 1234,
     }).usage_ratio).toBeNull()
+  })
+
+  it('connects to peers discovered by HTTP signaling polls after an empty join list', async () => {
+    const intervalCallbacks: Array<() => void> = []
+    const localStore = new Map<string, string>()
+
+    class TestMessageChannel {
+      port1: { onmessage: ((event: MessageEvent) => void) | null; postMessage: (data: unknown) => void }
+      port2: { onmessage: ((event: MessageEvent) => void) | null; postMessage: (data: unknown) => void }
+
+      constructor() {
+        this.port1 = {
+          onmessage: null,
+          postMessage: (data: unknown) => {
+            this.port2.onmessage?.({ data } as MessageEvent)
+          },
+        }
+        this.port2 = {
+          onmessage: null,
+          postMessage: (data: unknown) => {
+            this.port1.onmessage?.({ data } as MessageEvent)
+          },
+        }
+      }
+    }
+
+    class MockDataChannel extends EventTarget {
+      readyState: RTCDataChannelState = 'connecting'
+      onmessage: ((this: RTCDataChannel, ev: MessageEvent) => unknown) | null = null
+      send = vi.fn()
+    }
+
+    class MockRTCPeerConnection extends EventTarget {
+      connectionState: RTCPeerConnectionState = 'new'
+      iceConnectionState: RTCIceConnectionState = 'new'
+      iceGatheringState: RTCIceGatheringState = 'new'
+      signalingState: RTCSignalingState = 'stable'
+      localDescription: RTCSessionDescriptionInit | null = null
+      remoteDescription: RTCSessionDescriptionInit | null = null
+      onnegotiationneeded: ((this: RTCPeerConnection, ev: Event) => unknown) | null = null
+      onicecandidate: ((this: RTCPeerConnection, ev: RTCPeerConnectionIceEvent) => unknown) | null = null
+
+      createDataChannel(): RTCDataChannel {
+        return new MockDataChannel() as unknown as RTCDataChannel
+      }
+
+      async setLocalDescription(): Promise<void> {
+        this.localDescription = { type: 'offer', sdp: 'mock-offer' }
+      }
+
+      async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+        this.remoteDescription = description
+      }
+
+      async addIceCandidate(): Promise<void> {}
+      async getStats(): Promise<RTCStatsReport> { return new Map() as unknown as RTCStatsReport }
+      restartIce(): void {}
+    }
+
+    vi.stubGlobal('MessageChannel', TestMessageChannel)
+    vi.stubGlobal('RTCPeerConnection', MockRTCPeerConnection)
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => localStore.get(key) ?? null,
+      setItem: (key: string, value: string) => { localStore.set(key, value) },
+      removeItem: (key: string) => { localStore.delete(key) },
+    })
+    vi.stubGlobal('window', {
+      location: {
+        search: '?nodexRoom=room-a&nodexSignalingUrl=https%3A%2F%2Fsignal.test%2Fapi%2Fsignal',
+      },
+      setInterval: vi.fn((callback: () => void) => {
+        intervalCallbacks.push(callback)
+        return intervalCallbacks.length
+      }),
+      clearInterval: vi.fn(),
+      addEventListener: vi.fn(),
+    })
+    vi.stubGlobal('navigator', {
+      serviceWorker: {
+        controller: {
+          postMessage: (_message: unknown, ports?: Array<{ postMessage: (data: unknown) => void }>) => {
+            ports?.[0]?.postMessage({ type: 'NODE_ID', nodeId: 'node-a' })
+          },
+        },
+        addEventListener: vi.fn(),
+      },
+      storage: { estimate: vi.fn() },
+      maxTouchPoints: 0,
+      userAgent: 'vitest',
+      platform: 'test',
+    })
+
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/join')) {
+        return new Response(JSON.stringify({ peers: [], polite: false, after: 0 }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (url.startsWith('https://signal.test/api/signal/poll')) {
+        return new Response(JSON.stringify({ peers: ['node-b'], polite: true, messages: [] }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+
+    await peerManager.init()
+    expect(connections.has('node-b')).toBe(false)
+
+    intervalCallbacks.at(-1)?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(connections.has('node-b')).toBe(true)
   })
 })

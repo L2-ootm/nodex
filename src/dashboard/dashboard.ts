@@ -176,20 +176,6 @@ if (typeof document !== 'undefined') {
           })
         }
         await peerManager.init()
-        // Fetch session key and post to SW for AES-GCM decryption (CRPT-02, idempotent)
-        const _sessionKeyToken = new URLSearchParams(window.location.search).get('nodexBetaToken') ?? ''
-        const _sessionKeyHeaders: Record<string, string> = _sessionKeyToken
-          ? { Authorization: `Bearer ${_sessionKeyToken}` }
-          : {}
-        fetch('/api/session-key', { headers: _sessionKeyHeaders })
-          .then((r) => r.json())
-          .then((data) => {
-            const { keyId, keyBytes } = data as { keyId: string; keyBytes: string }
-            if (navigator.serviceWorker.controller) {
-              navigator.serviceWorker.controller.postMessage({ type: 'IMPORT_SESSION_KEY', keyId, keyBytes })
-            }
-          })
-          .catch((err) => console.warn('[dashboard] session key fetch failed:', err))
       })
       .catch(() => {
         clearTimeout(swTimeoutId)

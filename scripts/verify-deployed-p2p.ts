@@ -1,6 +1,7 @@
 import { chromium, type Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { openNodesForMode, resolveJoinMode } from './verify-deployed-p2p-options.js'
 
 // Load .env.backend as fallback — shell env takes precedence over file values
 function loadEnvFile(filePath: string): void {
@@ -26,6 +27,7 @@ const appOrigin = process.env['NODEX_DEPLOYED_APP_ORIGIN'] ?? 'https://nodex-bet
 const signalingUrl = process.env['NODEX_DEPLOYED_SIGNALING_URL'] ?? 'https://nodex-beta-api.vercel.app/api/signal'
 const apiOrigin = process.env['NODEX_DEPLOYED_API_ORIGIN'] ?? 'https://nodex-beta-api.vercel.app'
 const roomId = process.env['NODEX_DEPLOYED_ROOM_ID'] ?? `deploy-smoke-${Date.now()}`
+const joinMode = resolveJoinMode()
 
 function firstTesterTokenFromEnv(): string {
   const raw = process.env['NODEX_BETA_TOKENS'] ?? ''
@@ -57,10 +59,30 @@ function tokenHeaders(): Record<string, string> {
   return betaToken ? { Authorization: `Bearer ${betaToken}` } : {}
 }
 
+function safeResponseUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl)
+    for (const key of [...url.searchParams.keys()]) {
+      if (/token|authorization|secret|key/i.test(key)) {
+        url.searchParams.set(key, '[redacted]')
+      }
+    }
+    return url.toString()
+  } catch {
+    return rawUrl.replace(/(nodexBetaToken|token|authorization|secret|key)=([^&\s]+)/gi, '$1=[redacted]')
+  }
+}
+
 async function openNode(page: Page, label: string): Promise<void> {
   page.on('console', (msg) => {
     if (msg.type() === 'error' || msg.text().includes('[p2p]') || msg.text().includes('[P2P]') || msg.text().includes('[signal]') || msg.text().includes('[SW]')) {
       console.log(`[${label} console ${msg.type()}] ${msg.text()}`)
+    }
+  })
+  page.on('response', (response) => {
+    const status = response.status()
+    if (status >= 400) {
+      console.log(`[${label} response ${status}] ${safeResponseUrl(response.url())}`)
     }
   })
   const launchUrl = nodeUrl()
@@ -167,6 +189,7 @@ async function authPreflight(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  console.log(`[preflight] joinMode: ${joinMode}`)
   await authPreflight()
 
   const browser = await chromium.launch()
@@ -176,12 +199,17 @@ async function main(): Promise<void> {
   const pageB = await contextB.newPage()
 
   try {
-    // Sequential joins: nodeA registers first so nodeB sees it in the peers list on join.
-    // Concurrent joins race on Supabase INSERT — both get peers:[] and never connect.
-    await openNode(pageA, 'nodeA')
-    await sleep(2000)
-    await openNode(pageB, 'nodeB')
-    await waitForMesh(pageA, pageB)
+    await openNodesForMode(
+      joinMode,
+      () => openNode(pageA, 'nodeA'),
+      () => openNode(pageB, 'nodeB'),
+      () => sleep(2000),
+    )
+    try {
+      await waitForMesh(pageA, pageB)
+    } catch (err) {
+      throw new Error(`mesh connection timeout in ${joinMode} mode for room ${roomId}: ${err instanceof Error ? err.message : String(err)}`)
+    }
 
     const seed = await pageA.evaluate(async () => {
       const res = await fetch('/api/products/1', { cache: 'no-store' })
@@ -213,6 +241,7 @@ async function main(): Promise<void> {
     }
 
     const result = {
+      joinMode,
       roomId,
       appOrigin,
       signalingUrl,
