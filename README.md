@@ -56,6 +56,8 @@ npm run beta:export-ledger
 npm run metrics:export
 ```
 
+The deployed P2P smoke derives its expected deployment commit from the current Git `HEAD` and refuses to produce hosted evidence when either the browser runtime or API reports a missing or different commit. Override intentionally with `npm run verify:deployed-p2p -- --expected-commit=<sha>` or `NODEX_DEPLOYED_EXPECTED_COMMIT`.
+
 ## Tooling Security
 
 Do not run the original `gsd-build/get-shit-done` toolchain or `get-shit-done-cc` npm package. The local original GSD runtime was quarantined on 2026-05-23 after a supply-chain warning. If GSD tooling is needed again, use the maintained fork only after package metadata verification:

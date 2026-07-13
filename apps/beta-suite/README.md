@@ -81,3 +81,5 @@ Deploy this app as a preview before changing the `nodex-beta.vercel.app` alias. 
 - admin token creation/revoke works in preview.
 
 Rollback is the previous Vercel deployment alias for `nodex-beta.vercel.app`.
+
+`verify:deployed-p2p` fails closed unless the web runtime build commit and backend `X-Nodex-Commit` match the expected commit. It uses the current local Git `HEAD` by default; use `--expected-commit=<sha>` or `NODEX_DEPLOYED_EXPECTED_COMMIT` only when intentionally checking a different deployed commit.

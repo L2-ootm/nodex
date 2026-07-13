@@ -1,4 +1,5 @@
 import { chromium, type Page } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
@@ -7,7 +8,12 @@ import {
   type FailedResponseDiagnostic,
   type NodeTimeoutSnapshot,
 } from './verify-deployed-p2p-diagnostics.js'
-import { openNodesForMode, resolveJoinMode } from './verify-deployed-p2p-options.js'
+import {
+  assertMatchingDeploymentCommit,
+  openNodesForMode,
+  resolveExpectedCommit,
+  resolveJoinMode,
+} from './verify-deployed-p2p-options.js'
 
 // Load .env.backend as fallback — shell env takes precedence over file values
 function loadEnvFile(filePath: string): void {
@@ -34,6 +40,19 @@ const signalingUrl = process.env['NODEX_DEPLOYED_SIGNALING_URL'] ?? 'https://nod
 const apiOrigin = process.env['NODEX_DEPLOYED_API_ORIGIN'] ?? 'https://nodex-beta-api.vercel.app'
 const roomId = process.env['NODEX_DEPLOYED_ROOM_ID'] ?? `deploy-smoke-${Date.now()}`
 const joinMode = resolveJoinMode()
+
+function localGitCommit(): string {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim()
+  } catch {
+    return ''
+  }
+}
+
+const expectedCommit = resolveExpectedCommit(process.argv.slice(2), process.env, localGitCommit())
 
 function firstTesterTokenFromEnv(): string {
   const raw = process.env['NODEX_BETA_TOKENS'] ?? ''
@@ -95,6 +114,7 @@ async function openNode(
     const configFn = (window as unknown as Record<string, unknown>)['__nodexRuntimeConfig']
     const config = typeof configFn === 'function' ? (configFn as () => Record<string, unknown>)() : {}
     const configProof = {
+      buildCommit: config['buildCommit'],
       apiOrigin: config['apiOrigin'],
       signalingUrl: config['signalingUrl'],
       hasToken: Boolean(config['apiTokenPresent']),
@@ -174,6 +194,7 @@ async function nodeTimeoutSnapshot(
         : []
       const connectedPeerCount = connectionStates.filter((connection) => connection.state === 'connected').length
       const runtimeConfigProof = {
+        buildCommit: config['buildCommit'],
         apiOrigin: config['apiOrigin'],
         signalingUrl: config['signalingUrl'],
         hasToken: Boolean(config['apiTokenPresent']),
@@ -250,22 +271,39 @@ async function runtimeConfig(page: Page): Promise<unknown> {
   })
 }
 
-async function authPreflight(): Promise<void> {
+async function deployedAppCommit(page: Page): Promise<string> {
+  return await page.evaluate(() => {
+    const fn = (window as unknown as Record<string, unknown>)['__nodexRuntimeConfig']
+    if (typeof fn !== 'function') return 'unknown'
+    const config = (fn as () => Record<string, unknown>)()
+    return typeof config['buildCommit'] === 'string' ? config['buildCommit'] : 'unknown'
+  })
+}
+
+async function authPreflight(): Promise<string> {
   console.log(`[preflight] token fingerprint: ${tokenFingerprint(betaToken)}`)
   console.log(`[preflight] apiOrigin: ${apiOrigin}`)
   console.log(`[preflight] signalingUrl: ${signalingUrl}`)
+  console.log(`[preflight] expectedCommit: ${expectedCommit}`)
   const res = await fetch(`${apiOrigin}/api/session-key`, {
     headers: betaToken ? { Authorization: `Bearer ${betaToken}` } : {},
   })
   if (!res.ok) {
     throw new Error(`[preflight] /api/session-key returned ${res.status} — token is invalid or missing. Aborting before launching browsers.`)
   }
-  console.log(`[preflight] /api/session-key → ${res.status} ok`)
+  const apiCommit = res.headers.get('X-Nodex-Commit')?.trim() || 'unknown'
+  console.log(`[preflight] /api/session-key → ${res.status} ok; apiCommit=${apiCommit}`)
+  return apiCommit
 }
 
 async function main(): Promise<void> {
   console.log(`[preflight] joinMode: ${joinMode}`)
-  await authPreflight()
+  const apiCommit = await authPreflight()
+  assertMatchingDeploymentCommit({
+    expectedCommit,
+    appCommit: expectedCommit,
+    apiCommit,
+  })
 
   const browser = await chromium.launch()
   const contextA = await browser.newContext()
@@ -282,6 +320,18 @@ async function main(): Promise<void> {
       () => openNode(pageB, 'nodeB', failedResponsesB),
       () => sleep(2000),
     )
+    const [appCommitA, appCommitB] = await Promise.all([
+      deployedAppCommit(pageA),
+      deployedAppCommit(pageB),
+    ])
+    assertMatchingDeploymentCommit({ expectedCommit, appCommit: appCommitA, apiCommit })
+    assertMatchingDeploymentCommit({ expectedCommit, appCommit: appCommitB, apiCommit })
+    const deploymentIdentity = {
+      expectedCommit,
+      appCommit: appCommitA,
+      apiCommit,
+    }
+    console.log(`[preflight] deployment identity verified: ${JSON.stringify(deploymentIdentity)}`)
     try {
       await waitForMesh(pageA, pageB)
     } catch (err) {
@@ -290,7 +340,13 @@ async function main(): Promise<void> {
         nodeTimeoutSnapshot(pageA, 'nodeA', failedResponsesA),
         nodeTimeoutSnapshot(pageB, 'nodeB', failedResponsesB),
       ])
-      throw new Error(formatMeshTimeoutError({ joinMode, roomId, failureReason, nodes }))
+      throw new Error(formatMeshTimeoutError({
+        joinMode,
+        roomId,
+        failureReason,
+        deploymentIdentity,
+        nodes,
+      }))
     }
 
     const seed = await pageA.evaluate(async () => {
@@ -325,6 +381,7 @@ async function main(): Promise<void> {
     const result = {
       joinMode,
       roomId,
+      deploymentIdentity,
       appOrigin,
       signalingUrl,
       connectedPeers: {

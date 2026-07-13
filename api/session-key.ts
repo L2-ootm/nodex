@@ -16,7 +16,7 @@ function getSessionKeyBytes(): Uint8Array {
 }
 
 const app = new Hono()
-app.use('*', cors({ origin: '*' }))
+app.use('*', cors({ origin: '*', exposeHeaders: ['X-Nodex-Commit'] }))
 
 app.get('/api/session-key', (c) => {
   if (!validateBetaToken(c.req.raw, 'tester')) {
@@ -26,6 +26,7 @@ app.get('/api/session-key', (c) => {
   }
   const keyBytes = getSessionKeyBytes()
   const keyB64 = Buffer.from(keyBytes).toString('base64')
+  c.header('X-Nodex-Commit', process.env['VERCEL_GIT_COMMIT_SHA']?.trim() || 'unknown')
   return c.json({ keyId: ENCRYPTION_KEY_ID, keyBytes: keyB64 })
 })
 

@@ -10,6 +10,7 @@ export interface NodeTimeoutSnapshot {
   connectedPeerCount?: number
   connectionStates?: Array<{ peerId: string; state: string }>
   runtimeConfigProof?: {
+    buildCommit?: unknown
     apiOrigin?: unknown
     signalingUrl?: unknown
     hasToken: boolean
@@ -29,6 +30,11 @@ export interface MeshTimeoutSnapshot {
   joinMode: JoinMode
   roomId: string
   failureReason: string
+  deploymentIdentity?: {
+    expectedCommit: string
+    appCommit: string
+    apiCommit: string
+  }
   nodes: NodeTimeoutSnapshot[]
 }
 

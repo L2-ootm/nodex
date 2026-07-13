@@ -14,7 +14,7 @@ import {
   type NodexRuntimeConfig,
   type IceServerConfig,
 } from '../shared/config.js'
-import { captureEvidence, initConsoleErrorCapture } from './evidence-capture.js'
+import { captureEvidence, getCommitHash, initConsoleErrorCapture } from './evidence-capture.js'
 import type {
   CandidatePathType,
   GossipMessage,
@@ -1041,6 +1041,7 @@ function markPeerManagerReady(): void {
   ;(window as unknown as Record<string, unknown>)['__nodexPeerTelemetrySamples'] = getPeerTelemetrySamples
   ;(window as unknown as Record<string, unknown>)['__nodexStoragePressure'] = collectStoragePressure
   ;(window as unknown as Record<string, unknown>)['__nodexRuntimeConfig'] = () => ({
+    buildCommit: getCommitHash(),
     appOrigin: config.appOrigin,
     apiOrigin: config.apiOrigin,
     signalingUrl: config.signalingUrl,

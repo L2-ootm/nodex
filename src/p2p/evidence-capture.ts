@@ -141,7 +141,7 @@ function getDeviceRole(): DeviceRole {
 
 declare const __NODEX_COMMIT_HASH__: string | undefined
 
-function getCommitHash(): string {
+export function getCommitHash(): string {
   try {
     return typeof __NODEX_COMMIT_HASH__ !== 'undefined' ? __NODEX_COMMIT_HASH__ : 'unknown'
   } catch {

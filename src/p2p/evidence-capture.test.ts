@@ -1,8 +1,12 @@
 // src/p2p/evidence-capture.test.ts
 import { describe, it, expect } from 'vitest'
-import { classifyRun } from './evidence-capture.js'
+import { classifyRun, getCommitHash } from './evidence-capture.js'
 
 describe('classifyRun', () => {
+  it('exposes the Vite-injected build commit for deployment evidence', () => {
+    expect(getCommitHash()).toBe('test')
+  })
+
   it('not_measured when no connection attempted', () => {
     const result = classifyRun({
       webrtcEdgeFormed: false,
