@@ -25,6 +25,12 @@ const base = {
 
 const events = [
   {
+    ...base, event_type: 'assignment_created', assignment_unit: 'session',
+    registry_version: 'registry-v1', cell_id: 'br-chromium-desktop',
+    population: 'synthetic-pilot', assignment_hash_version: 'hmac-sha256-v1',
+    eligibility_state: 'eligible',
+  },
+  {
     ...base, event_type: 'read_observed', conventional_path: 'cdn', http_status: 200,
     latency_ms: 24, response_bytes: 4096, object_class: 'bounded', size_bucket: '1-16kb',
     auth_scope_class: 'public', telemetry_complete: true,
@@ -83,7 +89,7 @@ describe('measurement event contracts', () => {
   })
 
   it('fails closed on missing provenance, unknown fields and invalid sampling', () => {
-    const valid = events[0]
+    const valid = events[1]
     const { commit_sha: _, ...missingCommit } = valid
     expect(() => assertMeasurementEvent(missingCommit)).toThrow('commit_sha')
     expect(() => assertMeasurementEvent({ ...valid, surprise: true })).toThrow('unknown field')
@@ -91,13 +97,13 @@ describe('measurement event contracts', () => {
   })
 
   it('rejects raw sensitive fields recursively', () => {
-    const coverage = events[4]
+    const coverage = events[5]
     expect(() => assertMeasurementEvent({ ...coverage, missing_by_stage: { token: 1 } })).toThrow('sensitive/raw field')
   })
 
   it('names malformed JSON and preserves the event discriminator', () => {
     expect(() => parseMeasurementEventJson('{nope', 'bad-event.json')).toThrow('bad-event.json: malformed JSON')
-    expect(parseMeasurementEventJson(JSON.stringify(events[1])).event_type).toBe('shadow_decision')
+    expect(parseMeasurementEventJson(JSON.stringify(events[2])).event_type).toBe('shadow_decision')
   })
 
   it('keeps the JSON Schema documents versioned and parseable', async () => {
@@ -112,8 +118,10 @@ describe('measurement event contracts', () => {
   })
 
   it('keeps golden valid and sensitive-field fixtures enforceable', async () => {
+    const assignment = await readFile('tests/fixtures/measurement/valid-assignment-event.json', 'utf8')
     const valid = await readFile('tests/fixtures/measurement/valid-read-event.json', 'utf8')
     const sensitive = await readFile('tests/fixtures/measurement/invalid-sensitive-event.json', 'utf8')
+    expect(parseMeasurementEventJson(assignment).event_type).toBe('assignment_created')
     expect(parseMeasurementEventJson(valid).event_type).toBe('read_observed')
     expect(() => parseMeasurementEventJson(sensitive)).toThrow('sensitive/raw field')
   })

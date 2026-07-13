@@ -3,6 +3,7 @@
   "$id": "https://nodex.local/schemas/measurement/v1/measurement-events.schema.json",
   "title": "Nodex Measurement Events v1",
   "oneOf": [
+    { "$ref": "#/$defs/assignment_created" },
     { "$ref": "#/$defs/read_observed" },
     { "$ref": "#/$defs/shadow_decision" },
     { "$ref": "#/$defs/webrtc_probe" },
@@ -19,7 +20,7 @@
       ],
       "properties": {
         "schema_version": { "const": 1 },
-        "event_type": { "enum": ["read_observed", "shadow_decision", "webrtc_probe", "invalidation_observed", "coverage"] },
+        "event_type": { "enum": ["assignment_created", "read_observed", "shadow_decision", "webrtc_probe", "invalidation_observed", "coverage"] },
         "event_id": { "$ref": "#/$defs/non_empty" },
         "event_time_server_ms": { "$ref": "#/$defs/non_negative_integer" },
         "experiment_id": { "$ref": "#/$defs/non_empty" },
@@ -44,6 +45,26 @@
         "monotonic_offset_ms": { "type": "number" },
         "clock_uncertainty_ms": { "type": "number", "minimum": 0 }
       }
+    },
+    "assignment_created": {
+      "allOf": [
+        { "$ref": "#/$defs/base" },
+        {
+          "type": "object",
+          "required": ["assignment_unit", "registry_version", "cell_id", "population", "assignment_hash_version", "eligibility_state"],
+          "properties": {
+            "event_type": { "const": "assignment_created" },
+            "assignment_unit": { "enum": ["session", "request", "probe_pair"] },
+            "registry_version": { "$ref": "#/$defs/non_empty" },
+            "cell_id": { "$ref": "#/$defs/non_empty" },
+            "population": { "$ref": "#/$defs/non_empty" },
+            "assignment_hash_version": { "$ref": "#/$defs/non_empty" },
+            "eligibility_state": { "enum": ["eligible", "ineligible", "unknown"] },
+            "exclusion_reason": { "$ref": "#/$defs/non_empty" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
     },
     "read_observed": {
       "allOf": [

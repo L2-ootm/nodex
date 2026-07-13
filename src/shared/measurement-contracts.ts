@@ -1,4 +1,5 @@
 export const MEASUREMENT_EVENT_TYPES = [
+  'assignment_created',
   'read_observed',
   'shadow_decision',
   'webrtc_probe',
@@ -42,6 +43,17 @@ export interface MeasurementEnvelopeV1 {
   visibility_state?: string
   monotonic_offset_ms?: number
   clock_uncertainty_ms?: number
+}
+
+export interface AssignmentCreatedV1 extends MeasurementEnvelopeV1 {
+  event_type: 'assignment_created'
+  assignment_unit: 'session' | 'request' | 'probe_pair'
+  registry_version: string
+  cell_id: string
+  population: string
+  assignment_hash_version: string
+  eligibility_state: 'eligible' | 'ineligible' | 'unknown'
+  exclusion_reason?: string
 }
 
 export interface ReadObservedV1 extends MeasurementEnvelopeV1 {
@@ -137,6 +149,7 @@ export interface CoverageV1 extends MeasurementEnvelopeV1 {
 }
 
 export type MeasurementEventV1 =
+  | AssignmentCreatedV1
   | ReadObservedV1
   | ShadowDecisionV1
   | WebRtcProbeV1
@@ -278,7 +291,10 @@ export function assertMeasurementEvent(value: unknown, path = '$'): asserts valu
   const required: string[] = [...COMMON_REQUIRED]
   const optional: string[] = [...COMMON_OPTIONAL]
 
-  if (eventType === 'read_observed') {
+  if (eventType === 'assignment_created') {
+    required.push('assignment_unit', 'registry_version', 'cell_id', 'population', 'assignment_hash_version', 'eligibility_state')
+    optional.push('exclusion_reason')
+  } else if (eventType === 'read_observed') {
     required.push('conventional_path', 'http_status', 'latency_ms', 'response_bytes', 'object_class', 'size_bucket', 'auth_scope_class', 'telemetry_complete')
     optional.push('cdn_cache_status', 'cdn_age_ms', 'returned_epoch', 'returned_counter', 'authoritative_epoch', 'authoritative_counter', 'k_versions', 't_ms', 'proof_age_ms', 'admission_result', 'admission_reason')
   } else if (eventType === 'shadow_decision') {
@@ -297,7 +313,12 @@ export function assertMeasurementEvent(value: unknown, path = '$'): asserts valu
   assertAllowedKeys(value, required, optional, path)
   assertCommon(value, path)
 
-  if (eventType === 'read_observed') {
+  if (eventType === 'assignment_created') {
+    enumField(value, 'assignment_unit', ['session', 'request', 'probe_pair'], path)
+    for (const key of ['registry_version', 'cell_id', 'population', 'assignment_hash_version']) stringField(value, key, path)
+    enumField(value, 'eligibility_state', ['eligible', 'ineligible', 'unknown'], path)
+    optionalString(value, 'exclusion_reason', path)
+  } else if (eventType === 'read_observed') {
     enumField(value, 'conventional_path', ['origin', 'cdn', 'sw'], path)
     numberField(value, 'http_status', path, { integer: true, min: 100, max: 599 })
     for (const key of ['latency_ms', 'response_bytes']) numberField(value, key, path, { min: 0 })

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "event_type": "assignment_created",
+  "event_id": "assignment-event-fixture-1",
+  "event_time_server_ms": 1784000000000,
+  "experiment_id": "nodex-observe-1",
+  "arm": "B3",
+  "assignment_id": "assignment-fixture-1",
+  "commit_sha": "abcdef1234567",
+  "build_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "protocol_version": "measurement-v1",
+  "config_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "sample_probability": 0.25,
+  "region_coarse": "br-southeast",
+  "assignment_unit": "session",
+  "registry_version": "registry-v1",
+  "cell_id": "br-chromium-desktop",
+  "population": "synthetic-pilot",
+  "assignment_hash_version": "hmac-sha256-v1",
+  "eligibility_state": "eligible"
+}
