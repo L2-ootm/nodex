@@ -1,6 +1,12 @@
 import { chromium, type Page } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import {
+  formatMeshTimeoutError,
+  safeResponseUrl,
+  type FailedResponseDiagnostic,
+  type NodeTimeoutSnapshot,
+} from './verify-deployed-p2p-diagnostics.js'
 import { openNodesForMode, resolveJoinMode } from './verify-deployed-p2p-options.js'
 
 // Load .env.backend as fallback — shell env takes precedence over file values
@@ -59,30 +65,23 @@ function tokenHeaders(): Record<string, string> {
   return betaToken ? { Authorization: `Bearer ${betaToken}` } : {}
 }
 
-function safeResponseUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl)
-    for (const key of [...url.searchParams.keys()]) {
-      if (/token|authorization|secret|key/i.test(key)) {
-        url.searchParams.set(key, '[redacted]')
-      }
-    }
-    return url.toString()
-  } catch {
-    return rawUrl.replace(/(nodexBetaToken|token|authorization|secret|key)=([^&\s]+)/gi, '$1=[redacted]')
-  }
-}
-
-async function openNode(page: Page, label: string): Promise<void> {
+async function openNode(
+  page: Page,
+  label: 'nodeA' | 'nodeB',
+  failedResponses: FailedResponseDiagnostic[],
+): Promise<void> {
   page.on('console', (msg) => {
     if (msg.type() === 'error' || msg.text().includes('[p2p]') || msg.text().includes('[P2P]') || msg.text().includes('[signal]') || msg.text().includes('[SW]')) {
-      console.log(`[${label} console ${msg.type()}] ${msg.text()}`)
+      console.log(`[${label} console ${msg.type()}] ${safeResponseUrl(msg.text())}`)
     }
   })
   page.on('response', (response) => {
     const status = response.status()
     if (status >= 400) {
-      console.log(`[${label} response ${status}] ${safeResponseUrl(response.url())}`)
+      const url = safeResponseUrl(response.url())
+      failedResponses.push({ status, url })
+      if (failedResponses.length > 10) failedResponses.splice(0, failedResponses.length - 10)
+      console.log(`[${label} response ${status}] ${url}`)
     }
   })
   const launchUrl = nodeUrl()
@@ -119,9 +118,9 @@ async function openNode(page: Page, label: string): Promise<void> {
     }
   }, [signalingUrl, betaToken ? `Bearer ${betaToken}` : ''] as [string, string])
   console.log(`[${label} join] nodeId=${joinInfo.nodeId} roomId=${joinInfo.roomId} poll=${joinInfo.pollStatus} messages=${joinInfo.messageCount ?? 0} connections=${joinInfo.connectionsSize} states=${JSON.stringify(joinInfo.connectionStates)}`)
-  console.log(`[${label} config] apiOrigin=${joinInfo.configProof?.apiOrigin} signalingUrl=${joinInfo.configProof?.signalingUrl} hasToken=${joinInfo.configProof?.hasToken} tokenLen=${joinInfo.configProof?.tokenLen} urlHasToken=${joinInfo.configProof?.urlHasToken}`)
+  console.log(`[${label} config] apiOrigin=${safeResponseUrl(String(joinInfo.configProof?.apiOrigin))} signalingUrl=${safeResponseUrl(String(joinInfo.configProof?.signalingUrl))} hasToken=${joinInfo.configProof?.hasToken} tokenLen=${joinInfo.configProof?.tokenLen} urlHasToken=${joinInfo.configProof?.urlHasToken}`)
   if (joinInfo.pollStatus === 401 || joinInfo.pollStatus === 502 || joinInfo.pollStatus === 508) {
-    console.error(`[${label}] poll returned ${joinInfo.pollStatus}${'pollUrl' in joinInfo ? ` url=${String((joinInfo as Record<string, unknown>)['pollUrl'])}` : ''}`)
+    console.error(`[${label}] poll returned ${joinInfo.pollStatus}${'pollUrl' in joinInfo ? ` url=${safeResponseUrl(String((joinInfo as Record<string, unknown>)['pollUrl']))}` : ''}`)
   }
   await page.evaluate(() => {
     const w = window as Window & {
@@ -156,6 +155,82 @@ async function waitForMesh(a: Page, b: Page): Promise<void> {
     await sleep(500)
   }
   throw new Error(`mesh connection timeout; counts=${counts.join(',')}`)
+}
+
+async function nodeTimeoutSnapshot(
+  page: Page,
+  label: 'nodeA' | 'nodeB',
+  failedResponses: FailedResponseDiagnostic[],
+): Promise<NodeTimeoutSnapshot> {
+  try {
+    const snapshot = await page.evaluate(async ([sigUrl, authHeader]: [string, string]) => {
+      const runtime = window as unknown as Record<string, unknown>
+      const nodeId = runtime['__nodeId']
+      const configFn = runtime['__nodexRuntimeConfig']
+      const config = typeof configFn === 'function' ? (configFn as () => Record<string, unknown>)() : {}
+      const conns = runtime['__peerConnections'] as Map<string, { state: string }> | undefined
+      const connectionStates = conns
+        ? [...conns.entries()].map(([peerId, connection]) => ({ peerId, state: connection.state }))
+        : []
+      const connectedPeerCount = connectionStates.filter((connection) => connection.state === 'connected').length
+      const runtimeConfigProof = {
+        apiOrigin: config['apiOrigin'],
+        signalingUrl: config['signalingUrl'],
+        hasToken: Boolean(config['apiTokenPresent']),
+        tokenLength: typeof config['apiTokenLength'] === 'number' ? config['apiTokenLength'] : 0,
+        urlHasToken: new URLSearchParams(location.search).has('nodexBetaToken'),
+      }
+      const diagnosticRoomId = new URLSearchParams(location.search).get('nodexRoom') ?? 'unknown'
+
+      try {
+        const headers: Record<string, string> = authHeader ? { Authorization: authHeader } : {}
+        const pollUrl = `${sigUrl}/poll?roomId=${encodeURIComponent(diagnosticRoomId)}&nodeId=${encodeURIComponent(String(nodeId))}&after=0`
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), 5_000)
+        const response = await fetch(pollUrl, { headers, signal: controller.signal })
+          .finally(() => window.clearTimeout(timeout))
+        if (!response.ok) {
+          return {
+            connectedPeerCount,
+            connectionStates,
+            runtimeConfigProof,
+            poll: { status: response.status, messageCount: 0 },
+          }
+        }
+        try {
+          const body = await response.json() as { messages?: unknown[] }
+          return {
+            connectedPeerCount,
+            connectionStates,
+            runtimeConfigProof,
+            poll: { status: response.status, messageCount: body.messages?.length ?? 0 },
+          }
+        } catch (err) {
+          return {
+            connectedPeerCount,
+            connectionStates,
+            runtimeConfigProof,
+            poll: { status: response.status, error: `invalid poll response: ${String(err)}` },
+          }
+        }
+      } catch (err) {
+        return {
+          connectedPeerCount,
+          connectionStates,
+          runtimeConfigProof,
+          poll: { status: -1, error: String(err) },
+        }
+      }
+    }, [signalingUrl, betaToken ? `Bearer ${betaToken}` : ''] as [string, string])
+
+    return { label, ...snapshot, failedResponses }
+  } catch (err) {
+    return {
+      label,
+      failedResponses,
+      captureError: err instanceof Error ? err.message : String(err),
+    }
+  }
 }
 
 async function metricCounts(page: Page): Promise<Record<string, number>> {
@@ -197,18 +272,25 @@ async function main(): Promise<void> {
   const contextB = await browser.newContext()
   const pageA = await contextA.newPage()
   const pageB = await contextB.newPage()
+  const failedResponsesA: FailedResponseDiagnostic[] = []
+  const failedResponsesB: FailedResponseDiagnostic[] = []
 
   try {
     await openNodesForMode(
       joinMode,
-      () => openNode(pageA, 'nodeA'),
-      () => openNode(pageB, 'nodeB'),
+      () => openNode(pageA, 'nodeA', failedResponsesA),
+      () => openNode(pageB, 'nodeB', failedResponsesB),
       () => sleep(2000),
     )
     try {
       await waitForMesh(pageA, pageB)
     } catch (err) {
-      throw new Error(`mesh connection timeout in ${joinMode} mode for room ${roomId}: ${err instanceof Error ? err.message : String(err)}`)
+      const failureReason = err instanceof Error ? err.message : String(err)
+      const nodes = await Promise.all([
+        nodeTimeoutSnapshot(pageA, 'nodeA', failedResponsesA),
+        nodeTimeoutSnapshot(pageB, 'nodeB', failedResponsesB),
+      ])
+      throw new Error(formatMeshTimeoutError({ joinMode, roomId, failureReason, nodes }))
     }
 
     const seed = await pageA.evaluate(async () => {
