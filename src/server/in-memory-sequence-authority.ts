@@ -14,10 +14,21 @@ interface CommandRecord {
   bump: SequenceBump
 }
 
+export interface InMemoryOutboxRecord extends SequenceBump {
+  tenantId: string
+  resourceKey: string
+  availableAt: number
+  attempts: number
+  lockedBy?: string
+  lockedUntil?: number
+  deliveredAt?: number
+  lastError?: string
+}
+
 export interface InMemorySequenceState {
   heads: Map<string, SequenceRecord>
   commands: Map<string, CommandRecord>
-  outbox: Map<string, SequenceBump & { resourceKey: string }>
+  outbox: Map<string, InMemoryOutboxRecord>
 }
 
 export function createInMemorySequenceState(): InMemorySequenceState {
@@ -70,7 +81,13 @@ export class InMemorySequenceAuthority implements SequenceAuthority {
     // head, command, and outbox as one deterministic transition.
     this.state.heads.set(headKey, { seq: bump.seq, updatedAt })
     this.state.commands.set(commandKey, { resourceKey, bump })
-    this.state.outbox.set(commandKey, { ...bump, resourceKey })
+    this.state.outbox.set(commandKey, {
+      ...bump,
+      tenantId: this.tenantId,
+      resourceKey,
+      availableAt: updatedAt,
+      attempts: 0,
+    })
     return { ...bump }
   }
 

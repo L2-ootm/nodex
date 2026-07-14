@@ -18,6 +18,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "signaling": "tsx src/server/signaling-server.ts",
+    "outbox:worker": "tsx src/server/run-outbox-worker.ts",
     "test:unit": "vitest run",
     "test": "vitest run && playwright test --project=chromium",
     "metrics:export": "tsx scripts/export-metrics.ts",

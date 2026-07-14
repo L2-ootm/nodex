@@ -186,10 +186,10 @@ export class GossipEngine {
   // sendInvalidation — originate a new gossip invalidation from this node
   // -------------------------------------------------------------------------
 
-  sendInvalidation(key: string, seq: number, originNodeId: string): void {
+  sendInvalidation(key: string, seq: number, originNodeId: string, msgId: string = crypto.randomUUID()): void {
     const msg: GossipMessage = {
       type: 'GOSSIP_INVALIDATE',
-      msgId: crypto.randomUUID(),
+      msgId,
       key,
       seq,
       ttl: GOSSIP_TTL,

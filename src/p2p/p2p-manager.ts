@@ -870,7 +870,7 @@ async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Pr
   if (msg.type === 'BROADCAST') {
     const bcast = msg as SignalingMessage
     if (bcast.key && typeof bcast.seq === 'number') {
-      gossipEngine.sendInvalidation(bcast.key, bcast.seq, bcast.from ?? 'server')
+      gossipEngine.sendInvalidation(bcast.key, bcast.seq, bcast.from ?? 'server', bcast.eventId)
     }
     return
   }

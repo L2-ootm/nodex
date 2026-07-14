@@ -106,6 +106,7 @@ export interface SignalingMessage {
   polite?: boolean
   key?: string
   seq?: number
+  eventId?: string
 }
 
 export type SwMessageType =

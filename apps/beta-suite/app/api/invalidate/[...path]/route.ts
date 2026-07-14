@@ -17,11 +17,21 @@ function validateAdminToken(req: NextRequest): boolean {
 async function notifySignaling(path: string, seq: number, eventId: string): Promise<void> {
   const signalingUrl = process.env['NODEX_BETA_SIGNALING_HTTP_URL']
   if (!signalingUrl) return
+  const token = process.env['NODEX_SIGNALING_SEED_TOKEN']
   try {
     await fetch(`${signalingUrl}/gossip-seed`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: path, seq, eventId, originNodeId: 'server' }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        tenantId: process.env['NODEX_TENANT_ID'],
+        key: path,
+        seq,
+        eventId,
+        originNodeId: 'server',
+      }),
       signal: AbortSignal.timeout(3000),
     })
   } catch { /* signaling offline — gossip propagates on next peer contact */ }

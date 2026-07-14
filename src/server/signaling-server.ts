@@ -9,8 +9,10 @@ import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { createNodeWebSocket } from '@hono/node-ws'
 import type { WSContext } from 'hono/ws'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { DEFAULT_SIGNALING_ROOM, SIGNALING_PORT, PEER_FANOUT, LONG_RANGE_PEER_COUNT } from '../shared/config.js'
 import type { SignalingMessage } from '../shared/types.js'
+import { assertSequenceResourceKey, assertSequenceUuid } from './sequence-authority.js'
 
 const app = new Hono()
 app.use('*', cors({ origin: '*' }))
@@ -144,15 +146,44 @@ app.get('/health', (c) => {
 
 // REST endpoint: seed a gossip invalidation into all connected peers across all rooms
 app.post('/gossip-seed', async (c) => {
-  let body: { key?: string; seq?: number; originNodeId?: string }
+  const expectedToken = process.env['NODEX_SIGNALING_SEED_TOKEN']
+  if (!expectedToken && process.env['NODE_ENV'] === 'production') {
+    return c.json({ error: 'seed endpoint unavailable' }, 503)
+  }
+  if (expectedToken) {
+    const supplied = c.req.header('Authorization')?.replace(/^Bearer\s+/i, '') ?? ''
+    const expectedHash = createHash('sha256').update(expectedToken).digest()
+    const suppliedHash = createHash('sha256').update(supplied).digest()
+    if (!timingSafeEqual(expectedHash, suppliedHash)) return c.json({ error: 'unauthorized' }, 401)
+  }
+
+  const expectedTenantId = process.env['NODEX_TENANT_ID']
+  if (!expectedTenantId && process.env['NODE_ENV'] === 'production') {
+    return c.json({ error: 'tenant boundary unavailable' }, 503)
+  }
+
+  let body: { tenantId?: string; key?: string; seq?: number; eventId?: string }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid json' }, 400) }
-  if (!body.key || typeof body.seq !== 'number') return c.json({ error: 'key and seq required' }, 400)
+  try {
+    if (body.tenantId !== undefined) assertSequenceUuid(body.tenantId)
+    assertSequenceResourceKey(body.key ?? '')
+    if (body.eventId !== undefined) assertSequenceUuid(body.eventId)
+  } catch {
+    return c.json({ error: 'invalid invalidation event' }, 400)
+  }
+  if (expectedTenantId && body.tenantId !== expectedTenantId) {
+    return c.json({ error: 'tenant mismatch' }, 403)
+  }
+  if (!Number.isSafeInteger(body.seq) || (body.seq as number) < 1) {
+    return c.json({ error: 'invalid invalidation event' }, 400)
+  }
 
   const msg: SignalingMessage = {
     type: 'BROADCAST',
-    from: body.originNodeId ?? 'server',
+    from: 'server',
     key: body.key,
     seq: body.seq,
+    eventId: body.eventId,
   }
   const payload = JSON.stringify(msg)
   let notified = 0

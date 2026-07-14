@@ -150,6 +150,16 @@ describe('GossipEngine', () => {
     expect(emitMetric).toHaveBeenCalledTimes(1)
   })
 
+  it('uses a server outbox event ID as the gossip deduplication identity', () => {
+    const connections = makeConnections([])
+    const engine = new GossipEngine(connections, emitMetric)
+    const eventId = crypto.randomUUID()
+
+    engine.sendInvalidation('/api/products/1', 7, 'server', eventId)
+
+    expect(emitMetric).toHaveBeenCalledWith(expect.objectContaining({ msgId: eventId }))
+  })
+
   it('onmessage drops message with seq <= locally cached seq (GOSP-04)', () => {
     const connections = makeConnections([])
     const engine = new GossipEngine(connections, emitMetric)
