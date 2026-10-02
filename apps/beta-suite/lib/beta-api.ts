@@ -11,6 +11,7 @@ import type {
   StoredAuth,
   TesterProfile,
 } from './types'
+import { meteredFetch } from '../../../src/shared/control-meter'
 
 const LOCAL_API_URL = 'http://localhost:3003'
 const PRODUCTION_API_URL = 'https://nodex-beta-api.vercel.app'
@@ -30,7 +31,8 @@ async function requestJson<T>(path: string, token?: string, init: RequestInit = 
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  const response = await fetch(`${betaApiBase()}${path}`, { ...init, headers })
+  const response = await meteredFetch('beta' + path.replace('/api/beta', ''), `${betaApiBase()}${path}`, {
+    ...init, headers, signal: init.signal ?? AbortSignal.timeout(8000) })
   const text = await response.text()
   const payload = text ? JSON.parse(text) as T & { error?: string } : {} as T & { error?: string }
   if (!response.ok) throw new Error(payload.error ?? `Request failed (${response.status})`)
@@ -41,9 +43,12 @@ export function authenticate(token: string): Promise<Omit<StoredAuth, 'token'>> 
   return requestJson<Omit<StoredAuth, 'token'>>('/api/beta/auth', token, { method: 'POST' })
 }
 
-export function createSession(token: string, profile: TesterProfile & { contributionNote?: string }): Promise<BetaSession> {
+export async function createSession(token: string, profile: TesterProfile & { contributionNote?: string }): Promise<BetaSession> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([token, profile])))
+  const requestId = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
   return requestJson<BetaSession>('/api/beta/sessions', token, {
     method: 'POST',
+    headers: { 'Idempotency-Key': requestId },
     body: JSON.stringify({
       name: profile.name,
       email: profile.email || undefined,

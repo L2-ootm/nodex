@@ -11,6 +11,11 @@ const RUN_EVIDENCE_KEY = 'nodex-next-run-evidence-v1'
 let cachedAuth: StoredAuth | null = null
 
 export interface StoredRunEvidence {
+  roomId?: string
+  reads?: unknown[]
+  economics?: unknown
+  controlObservations?: unknown[]
+  invalidation?: unknown
   topologyLabel: string
   resultHint: 'pass' | 'partial' | 'fail' | 'not_measured'
   telemetry: unknown[]
@@ -118,8 +123,12 @@ export function buildLogBundle(auth: StoredAuth | null, session: BetaSession | n
 }
 
 export function readRunEvidence(): StoredRunEvidence | null {
-  return readJson<StoredRunEvidence>(RUN_EVIDENCE_KEY)
+  const evidence = readJson<StoredRunEvidence>(RUN_EVIDENCE_KEY)
+  const room = readActiveRoom()?.roomId ?? readSession()?.roomId
+  return evidence?.roomId && evidence.roomId === room ? evidence : null
 }
+
+export function clearRunEvidence(): void { localStorage.removeItem(RUN_EVIDENCE_KEY) }
 
 export function writeRunEvidence(evidence: StoredRunEvidence): void {
   writeJson(RUN_EVIDENCE_KEY, evidence)

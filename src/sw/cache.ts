@@ -13,6 +13,7 @@ import { getDb } from './idb.js'
 import {
   CACHE_NAME,
   CACHE_MAX_BYTES,
+  CACHE_MAX_ENTRIES,
   META_STORE,
 } from '../shared/config.js'
 import type { CacheMeta } from '../shared/types.js'
@@ -140,82 +141,71 @@ export async function getCachedEntry(
  * @param seq      The X-Nodex-Seq value from the response header
  * @param ttl_ms   Optional TTL in ms from deriveTTL; 0 = ephemeral (skip caching); absent = stable/no expiry
  */
+let cacheWrites: Promise<void> = Promise.resolve()
+
+/** Reset only Nodex content, serialized with its in-flight writes. */
+export async function resetPublicCache(): Promise<void> {
+  const operation = cacheWrites.then(async () => { await self.caches.delete(CACHE_NAME) })
+  cacheWrites = operation.catch(() => {})
+  await operation
+}
+
 export async function putCachedEntry(
-  key: string,
-  response: Response,
-  seq: number,
-  ttl_ms?: number,
-  validated_at?: number
+  key: string, response: Response, seq: number, ttl_ms?: number, validated_at?: number,
+  isCurrent: () => boolean = () => true,
 ): Promise<void> {
-  // Ephemeral keys (TTL = 0ms) must not be cached — skip write entirely (CR-02)
-  if (ttl_ms === 0) {
-    console.log('[cache] Skipping ephemeral key (ttl_ms=0):', key)
-    return
-  }
-  if (key.startsWith('__')) return
-  if (response.type === 'opaque') {
-    console.warn('[cache] Skipping opaque response for:', key)
-    return
-  }
-
-  // Estimate byte size from Content-Length; fall back to 500B
-  const rawLen = response.headers.get('content-length')
-  const byteSize = rawLen ? (parseInt(rawLen, 10) || 500) : 500
-
-  // --- LRU eviction check ---
-  let allMeta: CacheMeta[] = []
-  try {
+  if (ttl_ms === 0 || key.startsWith('__') || !response.ok || response.type === 'opaque') return
+  if (!Number.isSafeInteger(seq) || seq < 1) return
+  // Serialize replacement, accounting and eviction, not merely the final put.
+  const operation = cacheWrites.then(async () => {
+    if (!isCurrent()) return
     const db = await getDb()
-    allMeta = await db.getAll(META_STORE)
-  } catch (err) {
-    console.warn('[cache] IDB getAll failed, skipping eviction check:', err)
-  }
-
-  const evictPath = evictIfNeeded(allMeta, byteSize)
-
-  if (evictPath) {
-    console.log('[cache] LRU evicting:', evictPath)
+    const existing = await db.get(META_STORE, key)
+    if (existing && existing.seq > seq) return
+    const reader = response.clone().body?.getReader()
+    if (!reader) return
+    const chunks: Uint8Array[] = []
+    let byteSize = 0
     try {
-      const cache = await self.caches.open(CACHE_NAME)
-      await cache.delete(evictPath)
-    } catch (err) {
-      console.warn('[cache] Cache delete failed for eviction target:', evictPath, err)
-    }
-    try {
-      const db = await getDb()
-      await db.delete(META_STORE, evictPath)
-    } catch (err) {
-      console.warn('[cache] IDB delete failed for eviction target:', evictPath, err)
-    }
-  }
-
-  // --- Write to Cache Storage ---
-  try {
+      while (true) {
+        const part = await reader.read()
+        if (part.done) break
+        byteSize += part.value.byteLength
+        if (byteSize > CACHE_MAX_BYTES) { void reader.cancel().catch(() => {}); return }
+        chunks.push(part.value)
+      }
+    } finally { reader.releaseLock() }
+    const data = new Uint8Array(byteSize)
+    let offset = 0
+    for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength }
+    const allMeta = (await db.getAll(META_STORE)).filter(meta => !meta.path.startsWith('__') && meta.path !== key)
+      .sort((a, b) => a.accessed_at - b.accessed_at)
     const cache = await self.caches.open(CACHE_NAME)
-    await cache.put(key, response.clone())
-  } catch (err) {
-    console.warn(isStorageQuotaPressure(err) ? '[cache] Cache put skipped due to quota pressure:' : '[cache] Cache put failed:', err)
-    // Return even if caching fails — caller already has the original response
-    return
-  }
-
-  // --- Write IDB metadata ---
-  try {
-    const db = await getDb()
-    const now = Date.now()
-    const meta: CacheMeta = {
-      path: key,
-      seq,
-      accessed_at: now,
-      byte_size: byteSize,
-      ...(ttl_ms !== undefined ? { ttl_ms, cached_at: now } : {}),
-      ...(validated_at !== undefined ? { validated_at } : {}),
+    let total = allMeta.reduce((sum, meta) => sum + meta.byte_size, 0)
+    while (allMeta.length && (total + byteSize > CACHE_MAX_BYTES || allMeta.length >= CACHE_MAX_ENTRIES)) {
+      const oldest = allMeta.shift()!
+      await cache.delete(oldest.path)
+      await db.delete(META_STORE, oldest.path)
+      total -= oldest.byte_size
     }
-    await db.put(META_STORE, meta)
-  } catch (err) {
-    // QuotaExceededError or other IDB failure — log, do not propagate (T-02-03)
-    console.warn(isStorageQuotaPressure(err) ? '[cache] IDB meta write skipped due to quota pressure:' : '[cache] IDB meta write failed:', err)
-  }
+    if (total + byteSize > CACHE_MAX_BYTES) return
+    const headers = new Headers(response.headers)
+    headers.set('Content-Length', String(byteSize))
+    if (!isCurrent()) return
+    await cache.put(key, new Response(data.buffer, { status: response.status, statusText: response.statusText, headers }))
+    try {
+      const now = Date.now()
+      await db.put(META_STORE, { path: key, seq, accessed_at: now, byte_size: byteSize,
+        ...(ttl_ms === undefined ? {} : { ttl_ms, cached_at: now }),
+        ...(validated_at === undefined ? {} : { validated_at }) })
+    } catch (error) {
+      // An unaccounted body must not survive a failed metadata write.
+      await cache.delete(key)
+      throw error
+    }
+  })
+  cacheWrites = operation.catch(error => { console.warn('[cache] write skipped:', error) })
+  await cacheWrites
 }
 
 // ---------------------------------------------------------------------------

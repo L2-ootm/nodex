@@ -114,7 +114,7 @@ async function fetchKey(handle: NodeHandle, key: string): Promise<number> {
 }
 
 async function postRoomGossip(handles: NodeHandle[], key: string, seq: number): Promise<string[]> {
-  const response = await handles[0].page.request.post('http://localhost:3001/api/gossip-seed', {
+  const response = await handles[0].page.request.post('http://localhost:33001/api/gossip-seed', {
     data: { path: key, seq, room: handles[0].roomId },
     headers: { 'Content-Type': 'application/json' },
   })
@@ -205,7 +205,7 @@ test('DEMO-01a: room-scoped signaling isolates simultaneous demo networks', asyn
     expect(peerIdsA.some((peerId) => nodeIdsB.has(peerId))).toBe(false)
     expect(peerIdsB.some((peerId) => nodeIdsA.has(peerId))).toBe(false)
 
-    const key = `/api/phase6-room-${Date.now()}`
+    const key = `/api/products/phase6-room-${Date.now()}`
     await postRoomGossip(handlesA, key, 6001)
     await sleep(1500)
 
@@ -231,7 +231,7 @@ test('DEMO-01b: product update reaches all 10 nodes with anti-entropy repair', a
       expect(await fetchKey(handle, key)).toBe(200)
     }
 
-    const invalidate = await handles[0].page.request.post(`http://localhost:3001/api/invalidate/api/products/${productId}`)
+    const invalidate = await handles[0].page.request.post(`http://localhost:33001/api/invalidate/api/products/${productId}`)
     expect(invalidate.ok()).toBe(true)
     const invalidation = await invalidate.json() as { newSeq: number }
 

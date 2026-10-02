@@ -5,6 +5,9 @@
 import type { DBSchema } from 'idb'
 
 export interface MetricsEvent {
+  event_id?: string        // Stable across live delivery, persistence and replay
+  request_id?: string
+  delivered_bytes?: number
   schema_version: 1
   type: 'sw-cache' | 'peer-fetch' | 'server-fallback' | 'gossip-propagation' | 'admission-rejected'
   key: string              // cache path key (e.g., '/api/products/42')
@@ -16,6 +19,7 @@ export interface MetricsEvent {
   t_invalidate?: number    // epoch ms when invalidation was first created
   t_received?: number      // epoch ms when this node received the gossip message
   hop_count?: number       // number of hops from origin (GOSSIP_TTL - msg.ttl)
+  publisher_verified?: boolean // unsigned gossip remains diagnostic only
   // Consistency admission gate — populated when type='admission-rejected'
   rejection_reason?: string  // AdmissionRejectReason from consistency.ts
   rejection_source?: 'cache' | 'peer' | 'server'  // which read path triggered the rejection
@@ -68,9 +72,11 @@ export interface CacheMeta {
   ttl_ms?: number          // optional TTL in ms derived from volatility tier; 0 = no caching; absent = no expiry
   cached_at?: number       // epoch ms when the entry was written; paired with ttl_ms for expiry check
   validated_at?: number    // server freshness-proof timestamp; authenticated in payload AAD
+  publisher_domain?: string // trusted tenant/authority epoch for the domain sentinel
 }
 
 export interface VolatilityEntry {
+  window_started_at?: number
   key: string
   change_count: number
   last_changed_at: number  // epoch ms — timestamp of most recent invalidation event
@@ -118,6 +124,8 @@ export type SwMessageType =
   | 'FLUSH_BUFFER'
   | 'GOSSIP_INVALIDATE'
   | 'IMPORT_SESSION_KEY'
+  | 'GET_SESSION_KEY'
+  | 'SESSION_KEY_RESPONSE'
   | 'REVALIDATE_KEY'
   | 'GET_CACHE_STATE'
   | 'SET_RUNTIME_FLAGS'
@@ -144,6 +152,7 @@ export interface SwMessage {
 
 // Phase 3 — Gossip invalidation message propagated over RTCDataChannel (gossip channel)
 export interface GossipMessage {
+  proof?: string          // Publisher signature; unsigned messages are only hints
   type: 'GOSSIP_INVALIDATE'
   msgId: string            // UUID — used for seen-set deduplication (T-03-01)
   key: string              // cache key being invalidated (path, e.g. '/api/products/42')

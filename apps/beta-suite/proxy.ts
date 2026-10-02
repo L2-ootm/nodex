@@ -7,6 +7,7 @@ export const config = {
     '/api/turn-credentials',
     '/api/invalidate/(.*)',  // (.*) needed to match nested paths like /products/1
     '/api/products/:path*',
+    '/api/write/:path*',
   ],
 }
 
@@ -20,6 +21,7 @@ const LIMITS: Record<string, number> = {
   turn: 20,        // fetched once on init
   invalidate: 10,  // admin-only, infrequent
   products: 200,   // product reads, CDN-style
+  write: 10,
 }
 
 function routeGroup(pathname: string): string | null {
@@ -28,10 +30,12 @@ function routeGroup(pathname: string): string | null {
   if (pathname === '/api/turn-credentials') return 'turn'
   if (pathname.startsWith('/api/invalidate/')) return 'invalidate'
   if (pathname.startsWith('/api/products/')) return 'products'
+  if (pathname.startsWith('/api/write/')) return 'write'
   return null
 }
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
+  if (req.method === 'OPTIONS') return NextResponse.next()
   const group = routeGroup(req.nextUrl.pathname)
   if (!group) return NextResponse.next()
 
@@ -39,6 +43,10 @@ export function middleware(req: NextRequest) {
   const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
   const bucketKey = `${ip}:${group}`
   const now = Date.now()
+  if (buckets.size >= 10000) {
+    for (const [key, entry] of buckets) if (now - entry.windowStart > WINDOW_MS) buckets.delete(key)
+    if (buckets.size >= 10000 && !buckets.has(bucketKey)) return new NextResponse('Rate limit capacity reached', { status: 429 })
+  }
   const bucket = buckets.get(bucketKey)
 
   if (!bucket || now - bucket.windowStart > WINDOW_MS) {

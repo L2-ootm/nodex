@@ -2,6 +2,7 @@ import { createClient } from '@supabase/supabase-js'
 import {
   assertSequenceResourceKey,
   assertSequenceUuid,
+  cloneSnapshot,
   MAX_SAFE_SEQUENCE,
   SequenceAuthorityInputError,
   SequenceAuthorityUnavailableError,
@@ -45,7 +46,7 @@ function parseRecord(row: Record<string, unknown>): SequenceRecord {
   const seq = parseSequence(row['seq'])
   const updatedAt = parseUpdatedAt(row['updated_at'])
   if (seq === null || updatedAt === null) throw new SequenceAuthorityUnavailableError()
-  return { seq, updatedAt }
+  return { seq, updatedAt, ...(row['payload'] != null ? { payload: cloneSnapshot(row['payload']) } : {}) }
 }
 
 export class SupabaseSequenceAuthority implements SequenceAuthority {
@@ -59,7 +60,7 @@ export class SupabaseSequenceAuthority implements SequenceAuthority {
   async read(resourceKey: string): Promise<SequenceRecord> {
     assertSequenceResourceKey(resourceKey)
     try {
-      const { data, error } = await this.client.rpc('nodex_read_sequence', {
+      const { data, error } = await this.client.rpc('nodex_read_snapshot', {
         p_tenant_id: this.tenantId,
         p_resource_key: resourceKey,
       })
@@ -90,6 +91,34 @@ export class SupabaseSequenceAuthority implements SequenceAuthority {
       }
       assertSequenceUuid(eventId)
       return { ...record, eventId, duplicate }
+    } catch (error) {
+      if (error instanceof SequenceAuthorityInputError) throw error
+      throw new SequenceAuthorityUnavailableError()
+    }
+  }
+
+  async write(resourceKey: string, idempotencyKey: string, expectedVersion: number, input: Record<string, unknown>) {
+    assertSequenceResourceKey(resourceKey)
+    assertSequenceUuid(idempotencyKey)
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw new SequenceAuthorityInputError()
+    const payload = cloneSnapshot(input)
+    try {
+      const { data, error } = await this.client.rpc('nodex_write_snapshot', {
+        p_tenant_id: this.tenantId, p_resource_key: resourceKey,
+        p_idempotency_key: idempotencyKey, p_expected_version: expectedVersion, p_payload: payload,
+      })
+      if (error) {
+        if ((error as RpcError & { code?: string }).code === '22023') throw new SequenceAuthorityInputError()
+        throw new SequenceAuthorityUnavailableError()
+      }
+      const row = singleRow(data)
+      if (row['conflict'] === true && Number.isSafeInteger(Number(row['seq'])) && Number(row['seq']) >= 0) {
+        return { conflict: true as const, currentVersion: Number(row['seq']) }
+      }
+      const record = parseRecord(row)
+      if (row['conflict'] !== false || typeof row['event_id'] !== 'string' || typeof row['duplicate'] !== 'boolean') throw new SequenceAuthorityUnavailableError()
+      assertSequenceUuid(row['event_id'])
+      return { ...record, eventId: row['event_id'], duplicate: row['duplicate'] }
     } catch (error) {
       if (error instanceof SequenceAuthorityInputError) throw error
       throw new SequenceAuthorityUnavailableError()

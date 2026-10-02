@@ -45,7 +45,7 @@ test.describe('SW-04: lifecycle — skipWaiting + clients.claim', () => {
     // Track network requests after reload to assert the second fetch is a cache hit
     let networkHitAfterReload = false
     page.on('request', (req) => {
-      if (req.url().includes(':3001/api/products/200')) {
+      if (req.url().includes(':33001/api/products/200')) {
         networkHitAfterReload = true
       }
     })

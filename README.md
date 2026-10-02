@@ -1,118 +1,48 @@
 # Nodex
 
-Nodex is a browser-native P2P distributed dynamic cache proof of concept. Browser clients act as encrypted cache nodes through Service Workers and WebRTC DataChannels; invalidation propagates through server-sequenced gossip; a lightweight volatility heuristic controls cache/P2P eligibility.
+Nodex is an experimental browser cache for globally public, frequently read snapshots. A Service Worker verifies publisher signatures, decrypts responses and chooses local cache, a WebRTC peer or the origin. The beta suite records what actually happened.
 
-## Status
+The current repair branch replaces several unsafe PoC contracts. It is suitable for local evaluation; it has not been released or certified against deployed Supabase, WAN/NAT, mobile suspension, live TURN or provider bills. Historical reports describe their original revisions and do not establish the current release status.
 
-v1.0 PoC milestone complete as of 2026-05-23. Phase 7 external-validity harness execution is complete as of 2026-05-24, with manual external-network UAT still pending.
+## Run locally
 
-Hosted beta validation update, 2026-05-27:
-
-- `https://nodex-beta.vercel.app` now serves the Next.js beta suite plus the real Vite protocol runtime at `/metrics.html` and `/sw.js`.
-- `https://nodex-beta-api.vercel.app` now serves the beta control plane and HTTP signaling fallback at `/api/signal/*`.
-- Production smoke opened two isolated browser contexts against the hosted site, formed a WebRTC edge through deployed HTTP signaling, seeded `/api/products/1` on node A, and observed node B serve the same key with `peer-fetch: 1`.
-- Latest production deployment IDs: web `dpl_A6ZJmtFwBDxyN1gMfAdA6nxfGfr6`; backend `dpl_HEbGrpaq9yyb5zr95oCctSENgwE2`.
-
-Beta readiness forensics update, 2026-05-31 (historical):
-
-- Do not start broad external beta yet. `docs/qa/nodex-forensics-beta-readiness-2026-05-31.md` found the then-current hosted deployed P2P smoke failing with `mesh connection timeout; counts=0,0`.
-- The same forensics pass found `npm run validate:external` failing in EXT-05 at `POST /api/gossip-seed`.
-- New v1.3 recovery milestone added as Phases 13-16: hosted P2P smoke recovery, churn/rejoin freshness recovery, tester UX/evidence reliability, and beta release candidate/evidence hygiene.
-
-Interphase execution update, 2026-06-17:
-
-- Local interphase gates pass after the concurrent-discovery fix: `npm run typecheck`, `npm run test:unit` (178/178), `npm run beta:next:build`, `npm run test:beta-next`, and `npm run validate:external`.
-- Hosted deployed smoke evidence is mixed. A sequential 2026-06-17 run formed a WebRTC edge and observed `peer-fetch: 1`, but a later diagnostic rerun timed out with `mesh connection timeout; counts=0,0` against the still-deployed runtime. Treat `npm run verify:deployed-p2p` as pending/flaky until the interphase runtime and API changes are deployed and rerun.
-- Interphase Phase 1 has started: HTTP signaling polls now heartbeat presence and return active peers, and the browser P2P manager consumes poll-discovered peers through `PEERS_LIST`.
-- Broad beta remains claim-gated. The current evidence does not prove WAN/NAT, forced TURN, mobile browser, background-tab behavior, geographic long-range topology, or a stable hosted concurrent-join gate.
-
-Final local-loopback validation:
-
-- 96 Vitest tests passed.
-- 44 Playwright tests passed.
-- 1 Playwright `fixme` remains for ICE failure simulation.
-- `npm run demo` passes and exports JSON/CSV metrics.
-- Latest full-run metrics: 30 gossip runs, p50 7ms, p95 9ms, max 12ms, 90% all-node receipt in the latest sample, 98.02% cache/P2P hit rate.
-- Phase 7/8 automated validation: 178 Vitest tests passed, full `npm test` passed with 56 Playwright tests and 1 known skip, `npm run test:beta-next` passed with 7 Chromium tests, `npm run validate:external` passed with 5 Phase 7 tests, and `metrics:export` exports Phase 7 JSON/CSV.
-- Phase 7 report: 3 pass, 1 partial, 0 fail, 6 not measured. LAN/WAN/TURN/background/mobile/geography remain manual external evidence, but the Next beta flow now captures background-tab lifecycle and mobile-oriented browser/device hints automatically when testers submit evidence.
-- Backend security posture is tracked internally; public releases avoid exposing deployment-specific database migration details.
-
-## Commands
-
-```bash
-npm run typecheck
-npm run build
-npm run beta:next:build
-npm run test:unit
-npm run test:beta-next
-npm run verify:deployed-p2p
-npm test
-npm run demo
-npm run validate:external
-npm run stress:external
-npm run beta:server
-npm run beta:stack
-npm run beta:export-ledger
-npm run metrics:export
-```
-
-The deployed P2P smoke derives its expected deployment commit from the current Git `HEAD` and refuses to produce hosted evidence when either the browser runtime or API reports a missing or different commit. Override intentionally with `npm run verify:deployed-p2p -- --expected-commit=<sha>` or `NODEX_DEPLOYED_EXPECTED_COMMIT`.
-
-## Tooling Security
-
-Do not run the original `gsd-build/get-shit-done` toolchain or `get-shit-done-cc` npm package. The local original GSD runtime was quarantined on 2026-05-23 after a supply-chain warning. If GSD tooling is needed again, use the maintained fork only after package metadata verification:
-
-```bash
-npx @opengsd/get-shit-done-redux@1.0.0 --codex --global
-```
-
-Use `@latest` only when intentionally accepting the newest redux release.
-
-## Key Artifacts
-
-- `NODEX_RESEARCH_RIGOR_STANDARD.md` — research rigor standard for paper-track development, evaluation, claims, collaboration, and real P2P evidence.
-- `Nodex_Technical_Report.md` — main research report.
-- `Nodex_Phase3_Complete_Technical_Report.md` — gossip/P2P/cache/encryption phase report.
-- `Nodex_Phase4_Complete_Technical_Report.md` — volatility heuristic phase report.
-- `Nodex_Phase5_Complete_Technical_Report.md` — 10-node metrics harness report.
-- `Nodex_Phase6_Complete_Technical_Report.md` — integration hardening/demo report.
-- `Nodex_Phase7_External_Validation_Report.md` — external-validity execution report.
-- `Nodex_v1_3_Interphase_Closeout_Report.md` — 2026-06-17 interphase execution report for hosted smoke recovery, concurrent discovery hardening, and v1.4 planning.
-- `Nodex_Multi_Machine_Test_Plan.md` — physical LAN/WAN/TURN/geographic validation plan.
-- `research/` — formalization, benchmark, connectivity, consistency, and state-of-the-art research notes curated for public review.
-
-Internal planning logs, private beta ledgers, person-specific test runbooks, meeting transcripts, and raw operational artifacts are intentionally excluded from the public repository.
-
-## Architecture
-
-- `src/sw/sw.ts` — Service Worker fetch routing, freshness, decrypt, P2P bridge, demo hooks.
-- `src/p2p/p2p-manager.ts` — page-side WebRTC connection manager.
-- `src/gossip/gossip-engine.ts` — custom epidemic gossip engine.
-- `src/server/mock-api.ts` — encrypted mock origin and gossip seed endpoint.
-- `src/server/signaling-server.ts` — Hono WebSocket matchmaker with room-scoped peer registries.
-- `src/server/beta-coordinator.ts` — separate Vercel/Hono beta API control plane for token auth, personalized tester invites, sessions, evidence, logs, token management, Blob-backed storage, and backend request simulations.
-- `api/signal/[...path].ts` — Vercel-compatible HTTP signaling fallback for deployed WebRTC handshakes and room-scoped gossip seeds.
-- `src/dashboard/dashboard.ts` — metrics dashboard and SW registration.
-- `apps/beta-suite/` — Next.js tester/admin beta suite. The `/run` page embeds the real `/metrics.html` protocol runtime rather than a simulated checklist.
-- `tests/phase-05.spec.ts` and `tests/phase-06.spec.ts` — 10-node validation/demo suites.
-- `scripts/verify-deployed-p2p.ts` — remote production smoke that verifies hosted WebRTC edge formation and a real `peer-fetch`.
-
-## Limits
-
-The PoC validates the local foreground loopback architecture. Hosted beta has produced a production-deployed sequential same-machine browser isolation pass, but the latest diagnostic rerun exposed a hosted mesh timeout against the still-deployed runtime, so the hosted smoke is not a stable beta gate yet. The 2026-06-17 interphase added poll-based peer discovery repair for concurrent/empty joins; this must be deployed and rerun before broad beta. Phase 7 measures local external-validity proxies such as ICE candidate telemetry, churn/rejoin, room isolation, storage pressure hooks, multi-tab identity/failover, and force-relay configuration plumbing. Two computers in the same city are enough for LAN and same-metro NAT tests, but not for geographic long-range / GOSP-06. Real LAN/WAN/TURN/background/mobile/geographic behavior remains unproven until the manual protocol is run.
-
-## Beta Testing
-
-Use the root app `/` with `npm run beta:stack` locally, or the hosted Next beta suite at `https://nodex-beta.vercel.app/`, for controlled internal/debug runs while topology evidence remains scoped. Do not invite broad external beta contributors until the manual topology checklist and concurrent join hardening pass. Hosted backend is `https://nodex-beta-api.vercel.app/api/beta/*`. The technical metrics dashboard remains available at `/metrics.html`; in production, the beta `/run` route loads that real runtime in an iframe with `nodexSignalingUrl=https://nodex-beta-api.vercel.app/api/signal`. The Next beta `/run` route persists protocol telemetry plus Page Visibility/lifecycle events and user-agent/device hints, and `/evidence` submits them under same-machine-isolation, background-tab, mobile-browser, LAN, WAN/NAT, TURN, or geographic topology labels. The beta coordinator stores local participant/evidence/run/simulation/log JSONL under `beta-data/` during local dev and uses Vercel Blob private storage in production. The ledger is for attribution and attorney review; it is not a legal inventorship determination.
-
-Phase 11 added a dedicated Next.js app under `apps/beta-suite`, keeping the research PoC intact while giving testers/admins real routes, cleaner role separation, and a more polished guided-test workflow. Phase 12 then added room-scoped live room rigor and the 2026-05-27 deployed real-protocol validation path. Internal phase-planning artifacts are not part of the public repository.
-
-Local Next beta suite:
+Use Node.js 24 and install the lockfile dependencies:
 
 ```powershell
-npm run beta:next:dev
-npm run beta:next:build
-npm run test:beta-next
+npm ci
+npx playwright install chromium
+npm run beta:local
 ```
 
-Use `NEXT_PUBLIC_NODEX_BETA_API_URL` for the frontend API target. Never expose Supabase service-role/secret keys or beta admin tokens through `NEXT_PUBLIC_*`.
+Open `http://localhost:4174`. The local tester invitation is `nodex-tester-local-development`; the local administrator invitation is `nodex-admin-local-development`. These credentials belong only to the loopback development stack. The command builds the protocol runtime and starts the complete API on port 3003 and Next on port 4174. It does not require Supabase. Environment files must be loaded by your shell or host; Next reads its own project environment. See [.env.example](.env.example).
+
+The guided run compares the same ordered keys, versions and payload digests across origin-only, local-cache and automatic delivery. A solo run is partial. A P2P result requires an attributed peer delivery. A tester cannot publish invalidations. The evidence download includes raw read and control observations; financial savings remain unmeasured without calibration.
+
+## Verify
+
+```powershell
+npm run typecheck
+npm run test:unit
+npm run test:beta-next
+npm run test:beta-real
+npm test
+npm audit
+```
+
+`test:beta-next` uses UI fixtures. `test:beta-real` uses real loopback APIs, encryption, HTTP signaling, Service Workers and persistence. The root browser suite includes the legacy WebSocket research harness. Build rejects a Service Worker that cannot run as a classic script or exceeds its 50 KiB gzip budget. Browser tests use isolated API ports; ports 4173, 4175 and 4176 must be free. Run suites sequentially because builds share artifacts.
+
+## Protocol contract
+
+Only `/api/products/<one alphanumeric, underscore or hyphen ID>` opts into shared reuse. The payload must be globally identical for that resource across readers. Query, authorization and explicit cookie-header requests bypass shared reuse. Native cookie headers are not generally observable by a Service Worker: never use these public routes for cookie-dependent content. Private/no-store responses and responses varying by cookies, authorization, language or `*` cannot enter the shared pool. Signed public scope is mandatory; CORS/compression variation is permitted.
+
+Publisher P-256 signatures authenticate resource, tenant, authority epoch, version, scope, ciphertext and validity. AES-GCM reader keys provide confidentiality, not permission to publish. Public reuse proves recent publication within five seconds; it does not promise linearizable reads or immediate knowledge of every concurrent write. When durable browser storage is available, verified public versions and invalidations establish monotonic barriers within an authority epoch. Otherwise only origin delivery remains available with an explicit volatile-consistency header. A trusted origin epoch transition resets Nodex content and barriers while preserving unrelated application caches.
+
+Writes use an administrator credential, an `Idempotency-Key` UUID and `{ baseVersion, data }`. `POST /api/write/api/products/1` commits payload, version, retry identity and outbox atomically. Stale or future bases return 409. Invalidation accepts `/api/invalidate/products/1` or `/api/invalidate/api/products/1`; `queued` means durable publication is pending, not delivered. The outbox worker performs eventual delivery with lease fencing.
+
+## Operation and evidence
+
+[OPERATIONS.md](OPERATIONS.md) describes production configuration, database migration, key rotation, privacy, failure recovery and economic calibration. [REPAIR_VALIDATION.md](REPAIR_VALIDATION.md) maps repaired audit findings to checks and records the limits of those checks.
+
+The product hypothesis is that shared snapshots can avoid additional origin work beyond a normal browser cache. Cache hit rate alone cannot establish that hypothesis or financial savings. The beta exports a controlled local comparison; adoption, a CDN baseline and billed net savings per hour still need a real pilot.
+
+Research reports and `research/` remain historical source material. Original quarantined GSD packages must not be executed as part of this project's workflow.

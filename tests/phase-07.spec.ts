@@ -57,7 +57,7 @@ async function openTwoTabs(browser: Browser, roomId: string): Promise<{ pages: P
 }
 
 async function postRoomGossip(handles: NodeHandle[], key: string, seq: number): Promise<void> {
-  const response = await handles[0].page.request.post('http://localhost:3001/api/gossip-seed', {
+  const response = await handles[0].page.request.post('http://localhost:33001/api/gossip-seed', {
     data: { path: key, seq, room: handles[0].roomId },
     headers: { 'Content-Type': 'application/json' },
   })

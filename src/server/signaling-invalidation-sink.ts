@@ -51,6 +51,6 @@ export function createSignalingInvalidationSink(
   if (!baseUrl || (env['NODE_ENV'] === 'production' && !token)) {
     throw new InvalidationOutboxUnavailableError()
   }
-  const endpoint = new URL('/gossip-seed', baseUrl).toString()
+  const endpoint = new URL('gossip-seed', baseUrl.replace(/\/$/, '') + '/').toString()
   return new SignalingInvalidationSink(endpoint, token, fetchImpl)
 }

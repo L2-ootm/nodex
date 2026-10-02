@@ -84,10 +84,10 @@ export function admitCandidate(input: AdmissionInput): AdmissionDecision {
   if (!candidate) return { admitted: false, reason: 'invalid-candidate' }
 
   if (
-    !isFiniteNonNegative(candidate.version) ||
+    !Number.isSafeInteger(candidate.version) || candidate.version < 1 ||
     !isFiniteNonNegative(candidate.updatedAt) ||
-    !isFiniteNonNegative(input.sessionObservedVersion) ||
-    !isFiniteNonNegative(input.latestKnownVersion) ||
+    !Number.isSafeInteger(input.sessionObservedVersion) || input.sessionObservedVersion < 0 ||
+    !Number.isSafeInteger(input.latestKnownVersion) || input.latestKnownVersion < 0 ||
     !isFiniteNonNegative(input.now)
   ) {
     return { admitted: false, reason: 'invalid-candidate' }

@@ -2,21 +2,14 @@ import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { put, get } from '@vercel/blob'
-import { ENCRYPTION_KEY_ID } from '../../src/shared/config.js'
+import { configuredSessionKey } from '../../src/server/session-key.js'
 import { buildPayloadAad } from '../../src/crypto/crypto.js'
 import { getSequenceAuthority } from '../../src/server/sequence-authority-provider.js'
+import { publishProof } from '../../src/server/publisher.js'
+import { PROOF_HEADER } from '../../src/crypto/publisher-proof.js'
+import type { SequenceRecord } from '../../src/server/sequence-authority.js'
 
 export const config = { runtime: 'nodejs' }
-
-function getSessionKeyBytes(): Uint8Array {
-  const hex = process.env['NODEX_SESSION_KEY_HEX'] ?? ''
-  if (/^[0-9a-f]{64}$/i.test(hex)) {
-    return new Uint8Array(Buffer.from(hex, 'hex'))
-  }
-  // Dev fallback — deterministic 32-byte key, NOT production-secure
-  const seed = 'nodex-dev-key-32bytes-padding!!!'
-  return new TextEncoder().encode(seed.slice(0, 32))
-}
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength)
@@ -51,6 +44,9 @@ async function logCapture(path: string, seq: number, ivB64: string, ctSample: st
 }
 
 export const app = new Hono()
+app.onError(() => new Response('Publisher unavailable', {
+  status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '1' },
+}))
 app.use('*', cors({
   origin: '*',
   exposeHeaders: ['X-Nodex-Seq', 'X-Nodex-Iv', 'X-Nodex-Key-Id', 'X-Nodex-Updated-At', 'X-Nodex-Validated-At'],
@@ -58,10 +54,10 @@ app.use('*', cors({
 
 app.get('/api/products/:id', async (c) => {
   const id = c.req.param('id')
-  if (!/^\d+$/.test(id)) return c.json({ error: 'invalid product id' }, 400)
+  if (!/^[a-zA-Z0-9_-]{1,240}$/.test(id)) return c.json({ error: 'invalid product id' }, 400)
 
   const path = `/api/products/${id}`
-  let authority: { seq: number; updatedAt: number }
+  let authority: SequenceRecord
   try {
     authority = await getSequenceAuthority().read(path)
   } catch {
@@ -73,14 +69,14 @@ app.get('/api/products/:id', async (c) => {
   const { seq, updatedAt } = authority
   const validatedAt = Date.now()
 
-  const keyBytes = getSessionKeyBytes()
+  const { bytes: keyBytes, keyId } = configuredSessionKey()
   const cryptoKey = await globalThis.crypto.subtle.importKey(
     'raw', toArrayBuffer(keyBytes), { name: 'AES-GCM' }, false, ['encrypt']
   )
 
-  const plaintext = JSON.stringify({ id, name: `Product ${id}`, price: 9.99, seq })
+  const plaintext = JSON.stringify(authority.payload ?? { id, name: `Product ${id}`, price: 9.99, seq })
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
-  const aad = buildPayloadAad(path, seq, ENCRYPTION_KEY_ID, validatedAt)
+  const aad = buildPayloadAad(path, seq, keyId, validatedAt)
 
   const ciphertext = await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: toArrayBuffer(iv), additionalData: toArrayBuffer(aad) },
@@ -90,15 +86,20 @@ app.get('/api/products/:id', async (c) => {
 
   const ivB64 = Buffer.from(iv).toString('base64')
   const ctB64 = Buffer.from(new Uint8Array(ciphertext)).toString('base64')
+  const proof = await publishProof({ resource: path, version: seq, validatedAt,
+    body: ctB64, iv: ivB64, encryptionKeyId: keyId })
 
   // Non-blocking capture log for interceptor panel
   void logCapture(path, seq, ivB64, ctB64.slice(0, 64))
 
   return c.body(ctB64, 200, {
     'Content-Type': 'text/plain',
+    'Cache-Control': 'no-cache',
+    [PROOF_HEADER]: proof,
+    'X-Nodex-Cache-Scope': 'public',
     'X-Nodex-Seq': String(seq),
     'X-Nodex-Iv': ivB64,
-    'X-Nodex-Key-Id': ENCRYPTION_KEY_ID,
+    'X-Nodex-Key-Id': keyId,
     'X-Nodex-Updated-At': String(updatedAt),
     'X-Nodex-Validated-At': String(validatedAt),
   })

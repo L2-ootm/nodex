@@ -12,6 +12,27 @@ const workerId = '10000000-0000-4000-8000-000000000001'
 const uuid = (value: number) => `20000000-0000-4000-8000-${String(value).padStart(12, '0')}`
 
 describe('outbox worker conformance', () => {
+  it('expired leases cannot acknowledge or reschedule a delivery', async () => {
+    let now = 1000
+    const state = createInMemorySequenceState()
+    await new InMemorySequenceAuthority(tenantId, state, () => now).bump('/api/products/1', uuid(50))
+    const outbox = new InMemoryInvalidationOutbox(tenantId, state, () => now)
+    const [event] = await outbox.claim(workerId, 1, 1000)
+    now = 2000
+    expect(await outbox.acknowledge(event.eventId, workerId)).toBe(false)
+    expect(await outbox.retry(event.eventId, workerId, 0, 'late')).toBe(false)
+    expect(await outbox.claim(uuid(51), 1, 1000)).toHaveLength(1)
+    expect(await outbox.acknowledge(event.eventId, workerId)).toBe(false)
+    expect(await outbox.acknowledge(event.eventId, uuid(51))).toBe(true)
+  })
+  it('each batch fences delayed work from the same process', async () => {
+    const owners: string[] = []
+    const outbox = { claim: async (owner: string) => { owners.push(owner); return [] }, acknowledge: vi.fn(), retry: vi.fn() }
+    await runOutboxBatch(outbox, { deliver: vi.fn() }, { workerId })
+    await runOutboxBatch(outbox, { deliver: vi.fn() }, { workerId })
+    expect(new Set(owners).size).toBe(2)
+    expect(owners).not.toContain(workerId)
+  })
   it('delivers and acknowledges a claimed batch', async () => {
     const state = createInMemorySequenceState()
     const authority = new InMemorySequenceAuthority(tenantId, state, () => 1_000)

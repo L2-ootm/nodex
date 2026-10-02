@@ -44,7 +44,14 @@ interface NodeIdRecord extends CacheMeta {
  * If absent: generates a UUID via crypto.randomUUID(), persists it, returns it.
  * Caches in module-level _nodeId after first resolution.
  */
-export async function getNodeId(): Promise<string> {
+let nodeIdPromise: Promise<string> | null = null
+export function getNodeId(): Promise<string> {
+  return nodeIdPromise ??= loadNodeId().catch(error => {
+    nodeIdPromise = null
+    throw error
+  })
+}
+async function loadNodeId(): Promise<string> {
   if (_nodeId) return _nodeId
 
   try {
@@ -93,8 +100,11 @@ export async function emitMetric(partial: {
   latency_ms: number
   rejection_reason?: string
   rejection_source?: 'cache' | 'peer' | 'server'
+  request_id?: string
+  delivered_bytes?: number
 }): Promise<void> {
   const event: MetricsEvent = {
+    event_id: crypto.randomUUID(),
     schema_version: 1,
     type: partial.type,
     key: partial.key,
@@ -103,6 +113,8 @@ export async function emitMetric(partial: {
     timestamp: Date.now(),
     ...(partial.rejection_reason ? { rejection_reason: partial.rejection_reason } : {}),
     ...(partial.rejection_source ? { rejection_source: partial.rejection_source } : {}),
+    ...(partial.request_id ? { request_id: partial.request_id } : {}),
+    ...(partial.delivered_bytes === undefined ? {} : { delivered_bytes: partial.delivered_bytes }),
   }
 
   // Emit on BroadcastChannel (D-14)
@@ -125,19 +137,19 @@ async function bufferMetric(event: MetricsEvent): Promise<void> {
   try {
     const db = await getDb()
 
-    const count = await db.count(METRICS_BUFFER_STORE)
+    const tx = db.transaction(METRICS_BUFFER_STORE, 'readwrite')
+    const count = await tx.store.count()
 
     if (count >= METRICS_BUFFER_MAX) {
       // Open a cursor on the store — auto-increment keys are ascending, so first cursor = oldest
-      const tx = db.transaction(METRICS_BUFFER_STORE, 'readwrite')
       const cursor = await tx.store.openCursor()
       if (cursor) {
         await cursor.delete()
       }
-      await tx.done
     }
 
-    await db.add(METRICS_BUFFER_STORE, event)
+    await tx.store.add(event)
+    await tx.done
   } catch (err) {
     // IDB failure must not crash the SW or block the response
     console.warn('[metrics] bufferMetric failed:', err)
@@ -156,13 +168,15 @@ async function bufferMetric(event: MetricsEvent): Promise<void> {
 export async function flushBuffer(): Promise<void> {
   try {
     const db = await getDb()
-    const buffered = await db.getAll(METRICS_BUFFER_STORE)
+    const tx = db.transaction(METRICS_BUFFER_STORE, 'readwrite')
+    const buffered = await tx.store.getAll()
+    await tx.store.clear()
+    await tx.done
 
     for (const event of buffered) {
       channel.postMessage(event)
     }
 
-    await db.clear(METRICS_BUFFER_STORE)
     console.log(`[metrics] flushed ${buffered.length} buffered events`)
   } catch (err) {
     console.warn('[metrics] flushBuffer failed:', err)

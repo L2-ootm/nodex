@@ -1,84 +1,32 @@
 import { type NextRequest, NextResponse } from 'next/server'
-import {
-  SequenceAuthorityInputError,
-  type SequenceBump,
-} from '../../../../../../src/server/sequence-authority'
-import { getSequenceAuthority } from '../../../../../../src/server/sequence-authority-provider'
+import { SEQUENCE_UUID_PATTERN } from '../../../../../../src/server/sequence-authority'
 
-function validateAdminToken(req: NextRequest): boolean {
-  const header = req.headers.get('Authorization') ?? ''
-  if (!header.startsWith('Bearer ')) return false
-  const token = header.slice(7).trim()
-  if (!token) return false
-  const admins = (process.env['NODEX_BETA_ADMIN_TOKENS'] ?? '').split(',').map((t) => t.trim()).filter(Boolean)
-  return admins.includes(token)
-}
-
-async function notifySignaling(path: string, seq: number, eventId: string): Promise<void> {
-  const signalingUrl = process.env['NODEX_BETA_SIGNALING_HTTP_URL']
-  if (!signalingUrl) return
-  const token = process.env['NODEX_SIGNALING_SEED_TOKEN']
-  try {
-    await fetch(`${signalingUrl}/gossip-seed`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        tenantId: process.env['NODEX_TENANT_ID'],
-        key: path,
-        seq,
-        eventId,
-        originNodeId: 'server',
-      }),
-      signal: AbortSignal.timeout(3000),
-    })
-  } catch { /* signaling offline — gossip propagates on next peer contact */ }
-}
-
-export async function POST(
-  req: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> },
-): Promise<NextResponse> {
-  if (!validateAdminToken(req)) {
+/** API owns authorization, database mutations and durable invalidation delivery. */
+export async function POST(req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }): Promise<Response> {
+  const authorization = req.headers.get('Authorization') ?? ''
+  if (!authorization.startsWith('Bearer ') || authorization.length > 4096) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
   const { path } = await params
-  const wildcardPath = '/' + path.join('/')
-  if (wildcardPath === '/') return NextResponse.json({ error: 'path required' }, { status: 400 })
-  const apiPath = `/api${wildcardPath}`
-  const idempotencyKey = req.headers.get('Idempotency-Key') ?? ''
-  let bump: SequenceBump
-  try {
-    bump = await getSequenceAuthority().bump(apiPath, idempotencyKey)
-  } catch (error) {
-    if (error instanceof SequenceAuthorityInputError) {
-      return NextResponse.json({ error: 'invalid invalidation command' }, { status: 400 })
-    }
-    return NextResponse.json(
-      { error: 'sequence authority unavailable' },
-      { status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '1' } },
-    )
+  const suffix = '/' + path.join('/')
+  const key = suffix.startsWith('/api/') ? suffix : '/api' + suffix
+  const idempotency = req.headers.get('Idempotency-Key') ?? ''
+  if (!/^\/api\/products\/[a-zA-Z0-9_-]{1,240}$/.test(key) || !SEQUENCE_UUID_PATTERN.test(idempotency)) {
+    return NextResponse.json({ error: 'invalid invalidation command' }, { status: 400 })
   }
-  void notifySignaling(apiPath, bump.seq, bump.eventId)
-  return NextResponse.json({
-    path: apiPath,
-    seq: bump.seq,
-    updatedAt: bump.updatedAt,
-    eventId: bump.eventId,
-    duplicate: bump.duplicate,
-    invalidated: true,
-  }, { headers: { 'Cache-Control': 'no-store' } })
-}
-
-export function OPTIONS(): NextResponse {
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key',
-    },
-  })
+  const apiOrigin = process.env['NEXT_PUBLIC_NODEX_BETA_API_URL'] || 'https://nodex-beta-api.vercel.app'
+  try {
+    const response = await fetch(new URL('/api/invalidate' + key, apiOrigin), {
+      method: 'POST', headers: { Authorization: authorization, 'Idempotency-Key': idempotency },
+      cache: 'no-store', signal: AbortSignal.timeout(5000),
+    })
+    return new Response(response.body, { status: response.status,
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store',
+        ...(response.headers.get('Retry-After') ? { 'Retry-After': response.headers.get('Retry-After')! } : {}) } })
+  } catch {
+    return NextResponse.json({ error: 'sequence authority unavailable' }, {
+      status: 503, headers: { 'Cache-Control': 'no-store', 'Retry-After': '1' },
+    })
+  }
 }

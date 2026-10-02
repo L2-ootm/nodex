@@ -122,7 +122,10 @@ async function matchingGossipCounts(
 }
 
 async function postGossipSeed(handles: NodeHandle[], key: string, seq: number): Promise<void> {
-  const response = await handles[0].page.request.post('http://localhost:3001/api/gossip-seed', {
+  const mutation = await handles[0].page.request.post('http://localhost:33001/api/invalidate' + key)
+  expect(mutation.ok()).toBe(true)
+  seq = (await mutation.json() as { newSeq: number }).newSeq
+  const response = await handles[0].page.request.post('http://localhost:33001/api/gossip-seed', {
     data: { path: key, seq, room: handles[0].roomId },
     headers: { 'Content-Type': 'application/json' },
   })
@@ -210,11 +213,11 @@ async function runConvergenceDistribution(
 ): Promise<Phase05Report['convergence']> {
   const table = buildZipfTable(5, 1.0)
   const rng = makePrng(42)
-  const keyPrefix = `/api/phase5-gossip-${Date.now()}`
+  const keyPrefix = `/api/products/phase5-gossip-${Date.now()}`
   const results: ConvergenceRoundResult[] = []
 
   for (let run = 0; run < runs; run++) {
-    const key = rankToKey(sampleZipf(table, rng), keyPrefix)
+    const key = `${keyPrefix}-${sampleZipf(table, rng)}`
     const result = await runConvergenceRound(handles, key, 1000 + run)
     results.push(result)
     await sleep(50)
@@ -308,7 +311,7 @@ async function aggregateLatencySamples(
 
 async function runCacheWorkload(handles: NodeHandle[], requestCount = 100): Promise<CacheBreakdown> {
   const warmPreCounts = await gossipCounts(handles)
-  await postGossipSeed(handles, `/api/phase5-cache-warm-${Date.now()}`, 30000)
+  await postGossipSeed(handles, `/api/products/phase5-cache-warm-${Date.now()}`, 30000)
   await waitForAnyNewGossip(handles, warmPreCounts, 5000)
 
   const key = '/api/products/1'
@@ -394,7 +397,7 @@ test('TEST-03: server-side gossip-seed POST triggers propagation observable via 
 
   try {
     await waitForMesh(handles, 1, 30_000)
-    const key = `/api/phase5-test03-${Date.now()}`
+    const key = `/api/products/phase5-test03-${Date.now()}`
     const preCounts = await gossipCounts(handles)
 
     await postGossipSeed(handles, key, 1001)

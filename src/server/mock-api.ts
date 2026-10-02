@@ -8,11 +8,20 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { DEFAULT_SIGNALING_ROOM, ENCRYPTION_KEY_ID } from '../shared/config.js'
+import { DEFAULT_SIGNALING_ROOM } from '../shared/config.js'
+import { sessionKeyId } from './session-key.js'
 import { buildPayloadAad } from '../crypto/crypto.js'
+import { getPublisher, publishProof } from './publisher.js'
+import { PROOF_HEADER } from '../crypto/publisher-proof.js'
 import { getPeers } from './signaling-server.js'
+import { cloneSnapshot, MAX_SAFE_SEQUENCE } from './sequence-authority.js'
+import { bodyLimit } from 'hono/body-limit'
+import { validateBetaToken } from '../../api/lib/auth.js'
+import nodePath from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const app = new Hono()
+app.use('*', bodyLimit({ maxSize: 70_000 }))
 
 // CORS must be applied BEFORE route handlers (Pitfall 7 — critical blocker if missed)
 // Opaque responses make response.headers.get('X-Nodex-Seq') return null, breaking the
@@ -47,10 +56,12 @@ function testFaultsEnabled(): boolean {
 // In-memory sequence counter — exported for test access (per D-10 and CONTEXT.md specifics)
 export const seqCounters = new Map<string, number>()
 const seqUpdatedAt = new Map<string, number>()
+export const snapshots = new Map<string, Record<string, unknown>>()
 
 // AES-GCM-256 key initialization — generated once per server startup
 let encryptionKey: CryptoKey
 export let sessionKeyBytes: Uint8Array = new Uint8Array(0)
+let encryptionKeyId = ''
 
 const cryptoReady: Promise<void> = (async () => {
   const rawKey = await globalThis.crypto.subtle.generateKey(
@@ -60,14 +71,21 @@ const cryptoReady: Promise<void> = (async () => {
   )
   const exported = await globalThis.crypto.subtle.exportKey('raw', rawKey)
   sessionKeyBytes = new Uint8Array(exported)
+  encryptionKeyId = sessionKeyId(sessionKeyBytes)
   encryptionKey = await globalThis.crypto.subtle.importKey(
     'raw',
-    sessionKeyBytes,
+    Uint8Array.from(sessionKeyBytes).buffer,
     { name: 'AES-GCM' },
     true,
     ['encrypt', 'decrypt']
   )
 })()
+
+app.get('/api/publisher-key', async c => {
+  c.header('Cache-Control', 'no-store')
+  try { return c.json((await getPublisher()).identity) }
+  catch { return c.json({ error: 'publisher unavailable' }, 503) }
+})
 
 // GET /api/products/:id — AES-GCM-256 encrypted product payload (CRPT-01)
 // Body: base64 ciphertext. Headers: X-Nodex-Iv (base64, 12 bytes), X-Nodex-Key-Id, X-Nodex-Seq
@@ -77,7 +95,7 @@ app.get('/api/products/:id', async (c) => {
   if (betaAuthEnforced()) {
     const authHeader = c.req.header('Authorization') ?? ''
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined
-    if (!isBetaTokenValid(token)) {
+    if (!await validateBetaToken(c.req.raw, 'tester')) {
       return c.json({ error: 'Unauthorized' }, 401)
     }
   }
@@ -85,6 +103,7 @@ app.get('/api/products/:id', async (c) => {
   const id = c.req.param('id')
   const path = `/api/products/${id}`
   if (!seqCounters.has(path)) {
+    snapshots.delete(path)
     seqCounters.set(path, 1)
     seqUpdatedAt.set(path, Date.now())
   }
@@ -92,7 +111,7 @@ app.get('/api/products/:id', async (c) => {
   // Fault injection is opt-in even outside production. NODE_ENV is frequently
   // unset in previews, so it is not a sufficient security boundary.
   const injectedSeq = testFaultsEnabled()
-    ? Number(c.req.query('__nodex_test_seq'))
+    ? Number(c.req.header('X-Nodex-Test-Seq') ?? c.req.query('__nodex_test_seq'))
     : Number.NaN
   const seq = Number.isSafeInteger(injectedSeq) && injectedSeq > 0
     ? injectedSeq
@@ -102,22 +121,27 @@ app.get('/api/products/:id', async (c) => {
 
   await cryptoReady
 
-  const jsonBody = JSON.stringify({ id, name: `Product ${id}`, price: 9.99 })
+  const jsonBody = JSON.stringify(snapshots.get(path) ?? { id, name: `Product ${id}`, price: 9.99 })
   const contentHash = createHash('sha256').update(jsonBody).digest('hex')
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
   const ciphertext = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: buildPayloadAad(path, seq, ENCRYPTION_KEY_ID, validatedAt) },
+    { name: 'AES-GCM', iv, additionalData: Uint8Array.from(buildPayloadAad(path, seq, encryptionKeyId, validatedAt)).buffer },
     encryptionKey,
     new TextEncoder().encode(jsonBody)
   )
   const ivBase64 = Buffer.from(iv).toString('base64')
   const ctBase64 = Buffer.from(new Uint8Array(ciphertext)).toString('base64')
+  const proof = await publishProof({ resource: path, version: seq, validatedAt,
+    scope: betaAuthEnforced() ? 'private' : 'public', body: ctBase64, iv: ivBase64, encryptionKeyId })
 
   return c.body(ctBase64, 200, {
     'Content-Type': 'text/plain',
+    'Cache-Control': betaAuthEnforced() ? 'private, no-store' : 'no-cache',
+    [PROOF_HEADER]: proof,
+    'X-Nodex-Cache-Scope': betaAuthEnforced() ? 'private' : 'public',
     'X-Nodex-Seq': String(seq),
     'X-Nodex-Iv': ivBase64,
-    'X-Nodex-Key-Id': ENCRYPTION_KEY_ID,
+    'X-Nodex-Key-Id': encryptionKeyId,
     'X-Nodex-Version': String(seq),
     'X-Nodex-Updated-At': String(updatedAt),
     'X-Nodex-Validated-At': String(validatedAt),
@@ -131,13 +155,16 @@ app.get('/api/products/:id', async (c) => {
 
 // POST /api/invalidate/:path{.+$} — bumps sequence counter for the given path
 // Reconstructs path as '/' + param to normalize to '/api/products/1' form
-app.post('/api/invalidate/:path{.+$}', (c) => {
-  const path = '/' + c.req.param('path')
+app.post('/api/invalidate/:path{.+$}', async (c) => {
+  if ((process.env['NODE_ENV'] === 'production' || betaAuthEnforced()) && !await validateBetaToken(c.req.raw, 'admin')) return c.json({ error: 'unauthorized' }, 401)
+  const suffix = '/' + c.req.param('path')
+  const path = suffix.startsWith('/api/') ? suffix : '/api' + suffix
   const current = seqCounters.get(path) ?? 1
+  if (current === MAX_SAFE_SEQUENCE) return c.json({ error: 'sequence exhausted' }, 503)
   const newSeq = current + 1
   seqCounters.set(path, newSeq)
   seqUpdatedAt.set(path, Date.now())
-  return c.json({ path, newSeq })
+  return c.json({ path, newSeq, seq: newSeq, invalidation: 'local-simulation' })
 })
 
 // POST /api/write/:path{.+$} — OCC write endpoint (IMPL-03)
@@ -150,6 +177,7 @@ app.post('/api/invalidate/:path{.+$}', (c) => {
 // Tests that assume version history starts at 1 (e.g. buildPayloadAad(path, 1, ...)) must issue
 // a GET before any write, or reset seqCounters in beforeEach to avoid decryption failures.
 app.post('/api/write/:path{.+$}', async (c) => {
+  if ((process.env['NODE_ENV'] === 'production' || betaAuthEnforced()) && !await validateBetaToken(c.req.raw, 'admin')) return c.json({ error: 'unauthorized' }, 401)
   const path = '/' + c.req.param('path')
   let body: { baseVersion?: unknown; data?: unknown }
   try {
@@ -157,11 +185,15 @@ app.post('/api/write/:path{.+$}', async (c) => {
   } catch {
     return c.json({ error: 'invalid json' }, 400)
   }
-  if (typeof body.baseVersion !== 'number') return c.json({ error: 'baseVersion required' }, 400)
+  if (!body || typeof body !== 'object' || !Number.isSafeInteger(body.baseVersion) || Number(body.baseVersion) < 1) return c.json({ error: 'baseVersion required' }, 400)
+  let payload: Record<string, unknown>
+  try { payload = cloneSnapshot(body.data) } catch { return c.json({ error: 'invalid snapshot data' }, 400) }
   const currentVersion = seqCounters.get(path) ?? 1
-  if (currentVersion > body.baseVersion) {
+  if (currentVersion !== body.baseVersion) {
     return c.json({ error: 'conflict', currentVersion, baseVersion: body.baseVersion }, 409)
   }
+  if (currentVersion === MAX_SAFE_SEQUENCE) return c.json({ error: 'sequence exhausted' }, 503)
+  snapshots.set(path, payload)
   seqCounters.set(path, currentVersion + 1)
   seqUpdatedAt.set(path, Date.now())
   return c.json({ version: currentVersion + 1, path }, 200)
@@ -180,7 +212,7 @@ app.get('/api/__test__/seq/:path{.+$}', (c) => {
 app.get('/api/session-key', async (c) => {
   await cryptoReady
   return c.json({
-    keyId: ENCRYPTION_KEY_ID,
+    keyId: encryptionKeyId,
     keyBytes: Buffer.from(sessionKeyBytes).toString('base64'),
   }, 200)
 })
@@ -189,15 +221,32 @@ app.get('/api/session-key', async (c) => {
 // Body: { path: string, seq: number }. Returns { seededNodeIds: string[] }
 // PoC: unauthenticated. Production: requires authenticated invalidation channel (T-03-01)
 app.post('/api/gossip-seed', async (c) => {
+  if ((process.env['NODE_ENV'] === 'production' || betaAuthEnforced()) && !await validateBetaToken(c.req.raw, 'admin')) return c.json({ error: 'unauthorized' }, 401)
   let body: { path?: string; seq?: number; room?: string }
   try {
     body = await c.req.json() as { path?: string; seq?: number; room?: string }
   } catch {
     return c.json({ error: 'invalid json' }, 400)
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return c.json({ error: 'invalid publication' }, 400)
   const { path, seq, room } = body
-  if (!path || typeof seq !== 'number') return c.json({ error: 'path and seq required' }, 400)
+  if (!path || !/^\/api\/products\/[a-zA-Z0-9_-]{1,240}$/.test(path) || !Number.isSafeInteger(seq) || Number(seq) < 1) return c.json({ error: 'path and seq required' }, 400)
   const roomId = room ?? c.req.header('X-Nodex-Room') ?? c.req.query('room') ?? DEFAULT_SIGNALING_ROOM
+  if (process.env['NODE_ENV'] !== 'test') {
+    const endpoint = process.env['NODEX_BETA_SIGNALING_HTTP_URL'] ?? 'http://127.0.0.1:3002'
+    const proof = seq === (seqCounters.get(path) ?? 1) ? await publishProof({
+      kind: 'invalidation', resource: path, version: Number(seq), validatedAt: Date.now(),
+    }) : undefined
+    try {
+      const upstream = await fetch(new URL('/gossip-seed', endpoint), { method: 'POST',
+        headers: { 'Content-Type': 'application/json',
+          ...(process.env['NODEX_SIGNALING_SEED_TOKEN'] ? { Authorization: `Bearer ${process.env['NODEX_SIGNALING_SEED_TOKEN']}` } : {}) },
+        body: JSON.stringify({ key: path, seq, room: roomId, proof, eventId: crypto.randomUUID(),
+          tenantId: process.env['NODEX_TENANT_ID'] }), signal: AbortSignal.timeout(3000) })
+      if (!upstream.ok) return c.json({ error: 'signaling seed unavailable' }, 503)
+      return c.json(await upstream.json())
+    } catch { return c.json({ error: 'signaling seed unavailable' }, 503) }
+  }
   const signalingPeers = getPeers(roomId)
   const candidates = [...signalingPeers.entries()]
     .filter(([, peer]) => peer.readyState === 1 /* OPEN */)
@@ -225,8 +274,9 @@ app.post('/api/gossip-seed', async (c) => {
   return c.json({ seededNodeIds }, 200)
 })
 
-if (process.env['NODE_ENV'] !== 'test') {
-  serve({ fetch: app.fetch, port: 3001 }, (info) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(nodePath.resolve(process.argv[1])).href) {
+  if (process.env['NODE_ENV'] === 'production') throw new Error('Mock API is development-only; production uses api/ handlers')
+  serve({ fetch: app.fetch, port: Number(process.env['NODEX_API_PORT'] ?? 3001), hostname: '127.0.0.1' }, (info) => {
     console.log(`[Nodex Mock API] Listening on http://localhost:${info.port}`)
   })
 }

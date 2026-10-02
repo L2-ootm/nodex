@@ -32,6 +32,7 @@ export function seedSeqMap(entries: CacheMeta[]): void {
  * Called after a server fallback fetch (self-seeding) and during activate seeding.
  */
 export function updateSeq(path: string, seq: number): void {
+  if (!Number.isSafeInteger(seq) || seq < 1) return
   const current = latestSeqMap.get(path) ?? 0
   if (seq > current) {
     latestSeqMap.set(path, seq)

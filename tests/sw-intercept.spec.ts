@@ -32,15 +32,15 @@ test.describe('SW-01: fetch interception', () => {
     expect(result2.ok).toBe(true)
   })
 
-  test('SW does NOT intercept POST requests — POST reaches port 3001', async ({ page }) => {
+  test('SW does NOT intercept POST requests — POST reaches port 33001', async ({ page }) => {
     // POSTs should pass through to the server — the SW only intercepts GET /api/*
     const requestPromise = page.waitForRequest(
-      (req) => req.url().includes(':3001/api/invalidate') && req.method() === 'POST',
+      (req) => req.url().includes(':33001/api/invalidate') && req.method() === 'POST',
       { timeout: 5000 }
     )
 
     await page.evaluate(async () => {
-      await fetch('http://localhost:3001/api/invalidate/api/products/101', {
+      await fetch('http://localhost:33001/api/invalidate/api/products/101', {
         method: 'POST',
         body: '',
       })
@@ -59,6 +59,6 @@ test.describe('SW-01: fetch interception', () => {
     })
     expect(result.status).toBe(200)
     // Should not have been served as a cache hit (will return HTML from Vite)
-    expect(result.url).not.toContain(':3001')
+    expect(result.url).not.toContain(':33001')
   })
 })

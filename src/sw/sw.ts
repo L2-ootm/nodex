@@ -8,7 +8,7 @@
 //   - Always response.clone() before cache.put(); return the original
 //   - IDB writes wrapped in try/catch; QuotaExceededError must NOT crash the SW
 //   - Guard opaque responses: skip cache.put() if response.type === 'opaque'
-//   - NaN guard on X-Nodex-Seq; fallback to seq=1
+//   - Invalid/missing authoritative versions fail closed
 //   - Cache key = new URL(request.url).pathname (not full URL — D-06)
 //
 // STRIDE mitigations:
@@ -18,8 +18,9 @@
 
 import { getDb } from './idb.js'
 import { seedSeqMap, updateSeq, isFresh, getLatestSeq } from './freshness.js'
-import { getCachedEntry, putCachedEntry, touchAccessedAt } from './cache.js'
+import { getCachedEntry, putCachedEntry, touchAccessedAt, resetPublicCache } from './cache.js'
 import { emitMetric, flushBuffer, getNodeId } from './metrics.js'
+import { meteredFetch, controlSnapshot } from '../shared/control-meter.js'
 import {
   CACHE_URL_PREFIX,
   CACHE_NAME,
@@ -30,11 +31,11 @@ import {
   VOL_P2P_GATE,
   VOLATILITY_STORE,
   ENCRYPTION_KEY_ID,
-  DEFAULT_API_ORIGIN,
 } from '../shared/config.js'
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { buildPayloadAad, decrypt as aesDecode } from '../crypto/crypto.js'
-import { computeScore, classifyTier, deriveTTL } from '../volatility/volatility.js'
+import { decodeProof, verifyProof, PROOF_HEADER, type PublisherIdentity } from '../crypto/publisher-proof.js'
+import { computeScore, classifyTier, deriveTTL, recordActivity } from '../volatility/volatility.js'
 import {
   admitAuthoritativeMetadata,
   admitCandidate,
@@ -45,12 +46,7 @@ import {
 declare const self: ServiceWorkerGlobalScope
 
 const SW_VERSION = '1.0.0'
-
-// Build-time API origin — injected by Vite from VITE_NODEX_BETA_API_URL; falls back to local dev default
-const SW_API_ORIGIN: string =
-  (typeof (import.meta as { env?: Record<string, string> }).env !== 'undefined'
-    ? (import.meta as { env?: Record<string, string> }).env?.['VITE_NODEX_BETA_API_URL']?.replace(/\/$/, '')
-    : undefined) ?? DEFAULT_API_ORIGIN
+const workerInstance = crypto.randomUUID()
 
 // Session keys imported via IMPORT_SESSION_KEY postMessage (CRPT-02)
 const sessionKeys = new Map<string, CryptoKey>()
@@ -60,8 +56,11 @@ const runtimeFlags = {
 }
 
 async function importSessionKey(keyId: string, keyBytes: string): Promise<void> {
+  if (!/^[a-zA-Z0-9._-]{1,160}$/.test(keyId) || typeof keyBytes !== 'string' || keyBytes.length > 128) throw new Error('Invalid session key')
   const raw = Uint8Array.from(atob(keyBytes), (c) => c.charCodeAt(0))
-  const cryptoKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, true, ['decrypt'])
+  if (raw.byteLength !== 32) throw new Error('Invalid session key size')
+  const cryptoKey = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['decrypt'])
+  if (sessionKeys.size >= 4 && !sessionKeys.has(keyId)) sessionKeys.delete(sessionKeys.keys().next().value!)
   sessionKeys.set(keyId, cryptoKey)
 }
 
@@ -69,8 +68,12 @@ async function ensureSessionKey(keyId: string): Promise<CryptoKey | null> {
   const existing = sessionKeys.get(keyId)
   if (existing) return existing
 
+  // A worker process can restart without controllerchange. Authorized controlled
+  // pages retain reader credentials; never persist their invitation in SW state.
+  if (await recoverReaderKey(keyId)) return sessionKeys.get(keyId) ?? null
+
   try {
-    const res = await fetch('/api/session-key', { mode: 'cors' })
+    const res = await meteredFetch('session-key', '/api/session-key', { mode: 'cors', signal: AbortSignal.timeout(2_000) })
     if (!res.ok) return null
     const data = await res.json() as { keyId: string; keyBytes: string }
     await importSessionKey(data.keyId, data.keyBytes)
@@ -81,6 +84,38 @@ async function ensureSessionKey(keyId: string): Promise<CryptoKey | null> {
   }
 }
 
+async function recoverReaderKey(keyId: string): Promise<boolean> {
+  const clients = (await self.clients.matchAll({ type: 'window' })).slice(0, 32)
+  if (!clients.length) return false
+  return new Promise<boolean>(resolve => {
+    const channels: MessageChannel[] = []
+    let finished = false
+    let remaining = clients.length
+    const finish = (success: boolean) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      for (const channel of channels) { channel.port1.close(); channel.port2.close() }
+      resolve(success)
+    }
+    const timer = setTimeout(() => finish(false), 1000)
+    for (const client of clients) {
+      const channel = new MessageChannel()
+      channels.push(channel)
+      channel.port1.onmessage = event => {
+        if (finished) return
+        channel.port1.onmessage = null
+        const message = event.data
+        if (message?.type === 'SESSION_KEY_RESPONSE' && message.keyId === keyId && typeof message.keyBytes === 'string') {
+          void importSessionKey(keyId, message.keyBytes).then(() => finish(true), () => { if (--remaining === 0) finish(false) })
+        } else if (--remaining === 0) finish(false)
+      }
+      try { client.postMessage({ type: 'GET_SESSION_KEY', keyId }, [channel.port2]) }
+      catch { if (--remaining === 0) finish(false) }
+    }
+  })
+}
+
 async function decryptPayloadResponse(key: string, response: Response, seq: number): Promise<Response> {
   const iv = response.headers.get('X-Nodex-Iv')
   const keyId = response.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
@@ -88,18 +123,20 @@ async function decryptPayloadResponse(key: string, response: Response, seq: numb
   if (!Number.isSafeInteger(validatedAt) || validatedAt <= 0) {
     return new Response('Invalid authoritative freshness metadata', { status: 502 })
   }
-  if (!iv) {
-    return response
-  }
-
-  const cryptoKey = await ensureSessionKey(keyId)
-  if (!cryptoKey) {
-    console.warn('[SW] Missing session key for encrypted response:', keyId)
-    return new Response('Decrypt key unavailable', { status: 502 })
-  }
+  if (!iv) return new Response('Authenticated envelope required', { status: 502 })
 
   try {
-    const ciphertext = await response.text()
+    const ciphertext = await response.clone().text()
+    const proof = decodeProof(response.headers.get(PROOF_HEADER))
+    const identity = proof ? await publisherIdentity(proof.signingKeyId) : null
+    if (!proof || !identity || proof.version !== seq || proof.validatedAt !== validatedAt ||
+      proof.iv !== iv || proof.encryptionKeyId !== keyId ||
+      !await verifyProof(proof, identity, key, 'content', ciphertext)) {
+      return new Response('Publisher verification failed', { status: 502 })
+    }
+    const cryptoKey = await ensureSessionKey(keyId)
+    if (!cryptoKey) return new Response('Decrypt key unavailable', { status: 502 })
+    if (domainOf(identity) !== publisherDomain) return new Response('Publisher domain changed', { status: 503 })
     const ctBytes = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0))
     const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0))
     const plaintext = await aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, seq, keyId, validatedAt))
@@ -108,7 +145,9 @@ async function decryptPayloadResponse(key: string, response: Response, seq: numb
       statusText: response.statusText,
       headers: {
         'Content-Type': 'application/json',
+        'Cache-Control': 'no-store', // plaintext is never a second, unverified HTTP cache
         'X-Nodex-Seq': String(seq),
+        'Content-Length': String(plaintext.byteLength),
       },
     })
   } catch (err) {
@@ -160,11 +199,13 @@ async function revalidateKey(key: string): Promise<{
   let serverSeq = localSeqBefore
 
   try {
-    const res = await fetch(`${SW_API_ORIGIN}/api/__test__/seq${key}`, { mode: 'cors' })
+    if (!isPublicPath(key)) throw new Error('Resource is not opted in')
+    const res = await fetchAndCache(new Request(new URL(key, self.location.origin), { cache: 'no-store' }),
+      key, self.performance.now(), false)
     if (res.ok) {
-      const body = await res.json() as { seq: number }
-      if (Number.isInteger(body.seq) && body.seq > 0) {
-        serverSeq = body.seq
+      const version = Number(res.headers.get('X-Nodex-Seq'))
+      if (Number.isSafeInteger(version) && version > 0) {
+        serverSeq = version
       }
     }
   } catch (err) {
@@ -202,9 +243,91 @@ async function revalidateKey(key: string): Promise<{
 const scoreCache = new Map<string, number>()
 
 // In-memory observed-version barrier — obs_s(key) per formal model Def. 4.2.
-// Monotonically non-decreasing. SW session scope: persists across page reloads
-// (SW stays alive), but resets on SW restart. Sufficient for PoC session guarantee.
+// Monotonic within the trusted authority epoch, restored on every worker boot.
 const observedVersionMap = new Map<string, number>()
+const publisherKeys = new Map<string, PublisherIdentity>()
+let publisherDomain: string | undefined
+let domainGeneration = 0
+let identityFetch: Promise<PublisherIdentity | null> | undefined
+function domainOf(identity: Pick<PublisherIdentity, 'tenant' | 'epoch'>): string { return JSON.stringify([identity.tenant, identity.epoch]) }
+async function bindPublisher(identity: PublisherIdentity): Promise<void> {
+  await boot()
+  const domain = domainOf(identity)
+  if (publisherDomain === domain) return
+  if (!durableState) {
+    domainGeneration++; publisherKeys.clear(); publisherDomain = domain
+    observedVersionMap.clear(); seedSeqMap([])
+    return // verified origin reads remain usable; reuse stays disabled
+  }
+  if (publisherDomain !== undefined) {
+    domainGeneration++
+    publisherDomain = undefined
+    publisherKeys.clear()
+    await Promise.all([...barrierWrites.values()])
+    await resetPublicCache()
+    const db = await getDb()
+    for (const entry of await db.getAll(META_STORE)) {
+      if (isPublicPath(entry.path) || entry.path.startsWith('__obs_v:') || entry.path.startsWith('__inv_v:')) {
+        await db.delete(META_STORE, entry.path)
+      }
+    }
+    observedVersionMap.clear(); seedSeqMap([]); hydratedKeys.clear(); scoreCache.clear(); hintRefresh.clear()
+  }
+  // First binding preserves legacy durable barriers; only a trusted domain
+  // transition authorizes a reset, never a key supplied by a peer.
+  const db = await getDb()
+  await db.put(META_STORE, { path: '__publisher_domain', seq: 0, accessed_at: Date.now(), byte_size: 0, publisher_domain: domain })
+  publisherDomain = domain
+}
+async function publisherIdentity(keyId: string): Promise<PublisherIdentity | null> {
+  if (publisherKeys.has(keyId)) return publisherKeys.get(keyId)!
+  try {
+    identityFetch ??= (async () => {
+      const response = await meteredFetch('publisher-key', '/api/publisher-key', { cache: 'no-store', signal: AbortSignal.timeout(2_000) })
+      if (!response.ok) return null
+      const identity = await response.json() as PublisherIdentity
+      if (![identity.keyId, identity.tenant, identity.epoch].every(value => typeof value === 'string' && value.length > 0 && value.length <= 512) ||
+        identity.publicJwk?.d || identity.publicJwk?.kty !== 'EC' || identity.publicJwk?.crv !== 'P-256') return null
+      await crypto.subtle.importKey('jwk', identity.publicJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+      await bindPublisher(identity)
+      publisherKeys.clear(); publisherKeys.set(identity.keyId, identity)
+      return identity
+    })()
+    const pending = identityFetch
+    try { const identity = await pending; return identity?.keyId === keyId ? identity : null }
+    finally { if (identityFetch === pending) identityFetch = undefined }
+  } catch { return null }
+}
+let bootPromise: Promise<void> | undefined
+function boot(): Promise<void> {
+  return bootPromise ??= (async () => {
+    const db = await getDb()
+    const entries = await db.getAll(META_STORE)
+    publisherDomain = entries.find(entry => entry.path === '__publisher_domain')?.publisher_domain
+    seedSeqMap(entries.filter(entry => !entry.path.startsWith('__')))
+    for (const entry of entries) {
+      if (entry.path.startsWith('__obs_v:')) observedVersionMap.set(entry.path.slice(8), entry.seq)
+      if (entry.path.startsWith('__inv_v:')) updateSeq(entry.path.slice(8), entry.seq)
+    }
+  })().catch(() => { /* Without durable state, only the origin may serve. */ durableState = false })
+}
+let durableState = true
+const hintRefresh = new Map<string, number>()
+const barrierWrites = new Map<string, Promise<void>>()
+async function persistBarrier(key: string, prefix: '__obs_v:' | '__inv_v:'): Promise<void> {
+  const generation = domainGeneration
+  const id = prefix + key
+  const write = (barrierWrites.get(id) ?? Promise.resolve()).then(async () => {
+    const db = await getDb()
+    if (generation !== domainGeneration) return
+    const seq = prefix === '__obs_v:' ? observedVersionMap.get(key) ?? 0 : getLatestSeq(key)
+    await db.put(META_STORE, { path: id, seq, accessed_at: Date.now(), byte_size: 0 })
+  })
+  const settled = write.catch(() => { durableState = false })
+  barrierWrites.set(id, settled)
+  await settled
+  if (barrierWrites.get(id) === settled) barrierWrites.delete(id)
+}
 
 // Map volatility score to a ConsistencyPolicy for admitCandidate().
 // score >= VOL_P2P_GATE entries are server-only (caught by VOL-05 gate before this runs).
@@ -234,24 +357,7 @@ async function activateSW(): Promise<void> {
   await self.clients.claim()
   console.log(`[SW ${SW_VERSION}] activated`)
 
-  // Seed in-memory seq map from IDB so isFresh() works without a cold-miss penalty
-  try {
-    const db = await getDb()
-    const allMeta: CacheMeta[] = await db.getAll(META_STORE)
-    seedSeqMap(allMeta)
-    console.log(`[SW] seeded seqMap with ${allMeta.length} entries`)
-    // Seed observedVersionMap from IDB sentinel entries (__obs_v:{key} pattern)
-    // Provides monotonic read continuity across page reloads within the same SW lifetime
-    for (const entry of allMeta) {
-      if (entry.path.startsWith('__obs_v:')) {
-        const key = entry.path.slice('__obs_v:'.length)
-        observedVersionMap.set(key, entry.seq)
-      }
-    }
-  } catch (err) {
-    // IDB unavailable — safe to continue; seqMap stays empty (all entries treated as fresh)
-    console.warn('[SW] IDB seed failed:', err)
-  }
+  await boot()
 
   // Seed in-memory scoreCache from IDB volatility ledger (best-effort, VOL-05)
   try {
@@ -276,11 +382,10 @@ async function activateSW(): Promise<void> {
 
   // Prune caches from older SW versions (any cache name that is not CACHE_NAME)
   try {
-    const { CACHE_NAME } = await import('../shared/config.js')
     const cacheNames = await self.caches.keys()
     await Promise.all(
       cacheNames
-        .filter((name) => name !== CACHE_NAME)
+        .filter((name) => name.startsWith('nodex-') && name !== CACHE_NAME)
         .map((name) => self.caches.delete(name))
     )
   } catch (err) {
@@ -301,6 +406,12 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
   // T-03-02: only process recognized message types; unknown types silently discarded
   if (type === 'FLUSH_BUFFER') {
     event.waitUntil(flushBuffer())
+  } else if (type === 'CONTROL_SNAPSHOT') {
+    const reply = event.ports[0]
+    if (reply) {
+      reply.postMessage({ ...controlSnapshot(Number(event.data.since) || 0), workerInstance })
+      reply.close()
+    }
   } else if (type === 'GET_NODE_ID') {
     // Reply on the transferred port (event.ports[0]) so page's port1.onmessage receives it
     const replyPort = event.ports[0]
@@ -323,6 +434,19 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
     }
     event.waitUntil(
       (async () => {
+        await boot()
+        const proof = decodeProof(event.data.proof ?? null)
+        const identity = proof ? await publisherIdentity(proof.signingKeyId) : null
+        if (!proof || proof.scope !== 'public' || proof.version !== seq || !identity || !await verifyProof(proof, identity, key, 'invalidation')) {
+          // Unsigned gossip is only a rate-limited hint to consult our trusted origin.
+          if (Date.now() - (hintRefresh.get(key) ?? 0) >= 1_000 && isPublicPath(key)) {
+            if (hintRefresh.size >= 500 && !hintRefresh.has(key)) hintRefresh.delete(hintRefresh.keys().next().value!)
+            hintRefresh.set(key, Date.now())
+            await fetchAndCache(new Request(new URL(key, self.location.origin), { cache: 'no-store' }), key, self.performance.now(), false)
+          }
+          return
+        }
+        if (domainOf(proof) !== publisherDomain || seq <= getLatestSeq(key)) return
         updateSeq(key, seq)
         try {
           const cache = await caches.open(CACHE_NAME)
@@ -332,6 +456,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
         }
         try {
           const db = await getDb()
+          await persistBarrier(key, '__inv_v:')
           await db.delete(META_STORE, key)
         } catch {
           // best-effort IDB delete
@@ -339,11 +464,10 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
         // Update volatility ledger on invalidation — refreshes scoreCache in-memory (VOL-05)
         try {
           const db = await getDb()
-          const existing = await db.get(VOLATILITY_STORE, key)
-          const entry: VolatilityEntry = existing
-            ? { ...existing, change_count: existing.change_count + 1, last_changed_at: Date.now() }
-            : { key, change_count: 1, last_changed_at: Date.now(), access_count: 0 }
-          await db.put(VOLATILITY_STORE, entry)
+          const tx = db.transaction(VOLATILITY_STORE, 'readwrite')
+          const entry = recordActivity(key, await tx.store.get(key), 'change')
+          await tx.store.put(entry)
+          await tx.done
           const score = computeScore(entry)
           scoreCache.set(key, score)
           // Broadcast volatility-update to dashboard for live tier display (VOL-04)
@@ -386,6 +510,18 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
     if (replyPort) {
       replyPort.postMessage({ type: 'SET_RUNTIME_FLAGS_RESULT', flags: { ...runtimeFlags } })
     }
+  } else if (type === 'EVICT_PUBLIC_KEY') {
+    const key = event.data?.key as string
+    const replyPort = event.ports[0]
+    event.waitUntil((async () => {
+      if (!isPublicPath(key)) { replyPort?.postMessage({ ok: false }); return }
+      try {
+        await (await caches.open(CACHE_NAME)).delete(key)
+        await (await getDb()).delete(META_STORE, key)
+        // Session barriers survive benchmark eviction.
+        replyPort?.postMessage({ ok: true })
+      } catch { replyPort?.postMessage({ ok: false }) }
+    })())
   } else if (type === 'GET_CACHE_STATE') {
     const { key } = event.data as { key: string }
     const replyPort = event.ports[0]
@@ -447,7 +583,8 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           // Re-serve the encrypted payload as-is (server stores ciphertext; SW never decrypts for peer serve)
           replyPort?.postMessage({
             found: true,
-            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq, validatedAt }),
+            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq, validatedAt,
+              proof: cached.headers.get(PROOF_HEADER) }),
           })
         } catch (err) {
           console.warn('[SW] P2P_FETCH_SERVE error:', err)
@@ -473,7 +610,7 @@ self.addEventListener('fetch', (event: FetchEvent) => {
     request.method !== 'GET' ||
     url.origin !== self.location.origin ||
     !url.pathname.startsWith(CACHE_URL_PREFIX) ||
-    url.pathname === '/api/session-key'
+    !isPublicPath(url.pathname)
   ) {
     // Non-/api/, non-GET, or cross-origin: fall through to the network
     return
@@ -487,346 +624,184 @@ self.addEventListener('fetch', (event: FetchEvent) => {
 // handleRequest — cache hit/miss/stale logic with LRU + metrics emission
 // ---------------------------------------------------------------------------
 
-async function handleRequest(request: Request): Promise<Response> {
-  const key = new URL(request.url).pathname  // D-06: cache key = pathname only
-  const start = self.performance.now()
-
-  // --- Cache lookup using cache.ts ---
-  const cached = runtimeFlags.disableCacheRead ? null : await getCachedEntry(key)
-
-  if (cached) {
-    const { response, meta } = cached
-    const cachedSeq = meta.seq
-
-    if (isFresh(key, cachedSeq)) {
-      // Consistency admission gate (G3/G9): check obs_s barrier before accepting cache hit.
-      // obs_s ensures monotonic reads: never serve a version older than one already observed.
-      const cacheScore = scoreCache.get(key) ?? VOL_COLD_START
-      // WR-03: skip admitCandidate entirely for high-volatility keys (score >= VOL_P2P_GATE).
-      // These keys are server-only by policy; the VOL-05 gate below routes them to the server.
-      // Calling admitCandidate here would emit an 'admission-rejected' / 'class-forbidden' metric
-      // that conflates policy-driven bypasses with real consistency barrier violations.
-      if (cacheScore >= VOL_P2P_GATE) {
-        // Fall through to VOL-05 gate and server fetch — no metric emitted for policy bypass
-      } else {
-      const cacheAdmit = admitCandidate({
-        candidate: {
-          key,
-          version: cachedSeq,
-          updatedAt: meta.validated_at as number,
-          class: 'fresh-dynamic',
-        },
-        policy: peerReadsPolicyFromScore(cacheScore),
-        sessionObservedVersion: observedVersionMap.get(key) ?? 0,
-        latestKnownVersion: getLatestSeq(key),
-        now: Date.now(),
-      })
-
-      if (!cacheAdmit.admitted) {
-        // Session barrier or policy rejected this version — fall through to server for fresh data.
-        // Emit admission-rejected metric so violations are measurable.
-        const rejLatency = Math.round((self.performance.now() - start) * 100) / 100
-        void emitMetric({ type: 'admission-rejected', key, latency_ms: rejLatency, rejection_reason: cacheAdmit.reason, rejection_source: 'cache' })
-        console.log('[SW] admission rejected (cache):', key, 'reason:', cacheAdmit.reason, 'obs=', observedVersionMap.get(key) ?? 0, 'cachedSeq=', cachedSeq)
-        // Fall through to server fetch below
-      } else {
-        // Admitted — update obs_s barrier to the version just served
-        observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, cachedSeq))
-        // Best-effort IDB persistence for monotonic read barrier (IMPL-02)
-        // Sentinel pattern: __obs_v:{key} in nodex-meta store; seq = observed version
-        getDb().then(db => db.put(META_STORE, {
-          path: '__obs_v:' + key,
-          seq: observedVersionMap.get(key) ?? 0,
-          accessed_at: Date.now(),
-          byte_size: 0,
-        })).catch(() => {})
-
-        // Fresh cache hit — update LRU timestamp (best-effort)
-        await touchAccessedAt(key)
-
-        // Increment access_count in volatility ledger (best-effort, CR-01)
-        getDb().then(db => {
-          return db.get(VOLATILITY_STORE, key).then(existing => {
-            if (existing) {
-              const updated: VolatilityEntry = { ...existing, access_count: existing.access_count + 1 }
-              return db.put(VOLATILITY_STORE, updated).then(() => {
-                scoreCache.set(key, computeScore(updated))
-              })
-            }
-          })
-        }).catch(() => { /* best-effort — volatility ledger is non-critical */ })
-
-        // Emit sw-cache metric (D-14)
-        const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
-        await emitMetric({ type: 'sw-cache', key, latency_ms })
-
-        console.log('[SW] cache-hit (fresh, admitted):', key, 'obs=', observedVersionMap.get(key))
-        return decryptPayloadResponse(key, response, cachedSeq)
-      }
-      } // end else (cacheScore < VOL_P2P_GATE)
-    }
-
-    // Stale: cached seq is behind the latest known seq — fall through to server fetch
-    console.log('[SW] cache-stale, fetching from server:', key, 'cachedSeq=', cachedSeq)
-  } else {
-    console.log('[SW] cache-miss, fetching from server:', key)
-  }
-
-  // --- VOL-05 routing gate: skip P2P for high-volatility keys (synchronous O(1) lookup) ---
-  const score = scoreCache.get(key) ?? VOL_COLD_START
-  if (score >= VOL_P2P_GATE) {
-    console.log('[SW] VOL-05 gate: skipping P2P, score=', score, 'key=', key)
-    return fetchAndCache(request, key, start)
-  }
-
-  // --- P2P peer fetch (200ms race timeout, PEER-06) ---
-  if (!runtimeFlags.disableP2P) {
-    const peerResponse = await tryPeerFetch(key)
-    if (peerResponse) {
-      const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
-      await emitMetric({ type: 'peer-fetch', key, latency_ms })
-      return peerResponse
-    }
-  }
-
-  // --- Server fallback ---
-  return fetchAndCache(request, key, start)
+function isPublicPath(path: string): boolean {
+  // Initial integration is intentionally limited to public product snapshots.
+  return /^\/api\/products\/[a-zA-Z0-9_-]+$/.test(path)
 }
-
-// ---------------------------------------------------------------------------
-// tryPeerFetch — SW→page postMessage bridge; races against P2P_FETCH_TIMEOUT_MS
-// ---------------------------------------------------------------------------
-
-async function tryPeerFetch(key: string): Promise<Response | null> {
-  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false })
-  if (clients.length === 0) return null
-
-  return new Promise<Response | null>((resolve) => {
-    const channel = new MessageChannel()
-    const timeout = setTimeout(() => resolve(null), P2P_FETCH_TIMEOUT_MS)
-
-    // port1 is transferred to page; SW listens on port2 to receive the reply
-    channel.port2.onmessage = async (event: MessageEvent) => {
-      clearTimeout(timeout)
-      if (
-        event.data?.type === 'P2P_FETCH_RESPONSE' &&
-        event.data.found &&
-        event.data.payload
-      ) {
-        // Payload is JSON: { ciphertext: base64, iv: base64, keyId: string, seq: number, validatedAt: number }
-        // CRPT-04: DTLS provides transport encryption; AES-GCM provides payload confidentiality
-        // at rest and in peer-to-peer transit (DataChannel content never plaintext in flight)
-        type PeerPayload = { ciphertext: string; iv: string; keyId: string; seq: number; validatedAt: number }
-        let parsed: Partial<PeerPayload>
-        try {
-          parsed = JSON.parse(event.data.payload as string) as Partial<PeerPayload>
-        } catch {
-          resolve(null)
-          return
-        }
-        if (
-          typeof parsed.ciphertext !== 'string' ||
-          typeof parsed.iv !== 'string' ||
-          typeof parsed.keyId !== 'string' ||
-          parsed.keyId.length === 0
-        ) {
-          resolve(null)
-          return
-        }
-        if (typeof parsed.seq !== 'number' || !isFresh(key, parsed.seq)) {
-          resolve(null)
-          return
-        }
-        // Consistency admission gate (G3/G9): check obs_s barrier before accepting peer response.
-        // Runs before AES decrypt to reject stale peers cheaply (no crypto cost on rejection).
-        const peerScore = scoreCache.get(key) ?? VOL_COLD_START
-        const peerAdmit = admitCandidate({
-          candidate: {
-            key,
-            version: parsed.seq,
-            updatedAt: parsed.validatedAt as number,
-            class: 'fresh-dynamic',
-          },
-          policy: peerReadsPolicyFromScore(peerScore),
-          sessionObservedVersion: observedVersionMap.get(key) ?? 0,
-          latestKnownVersion: getLatestSeq(key),
-          now: Date.now(),
-        })
-        if (!peerAdmit.admitted) {
-          void emitMetric({ type: 'admission-rejected', key, latency_ms: 0, rejection_reason: peerAdmit.reason, rejection_source: 'peer' })
-          console.log('[SW] peer-fetch admission rejected:', key, 'reason:', peerAdmit.reason)
-          resolve(null)
-          return
-        }
-        const cryptoKey = await ensureSessionKey(parsed.keyId)
-        if (!cryptoKey) {
-          resolve(null)
-          return
-        }
-        let ctBytes: Uint8Array
-        let ivBytes: Uint8Array
-        try {
-          ctBytes = Uint8Array.from(atob(parsed.ciphertext), (c) => c.charCodeAt(0))
-          ivBytes = Uint8Array.from(atob(parsed.iv), (c) => c.charCodeAt(0))
-        } catch {
-          resolve(null)
-          return
-        }
-        // aesDecode throws DOMException(OperationError) on tamper/wrong key → server fallback (CRPT-03)
-        aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, parsed.seq, parsed.keyId, parsed.validatedAt as number))
-          .then(async (plaintext: Uint8Array) => {
-            const currentScore = scoreCache.get(key) ?? VOL_COLD_START
-            const tier = classifyTier(currentScore)
-            const ttl_ms = deriveTTL(tier)
-            await putCachedEntry(
-              key,
-              new Response(parsed.ciphertext, {
-                status: 200,
-                headers: {
-                  'Content-Type': 'text/plain',
-                  'X-Nodex-Seq': String(parsed.seq),
-                  'X-Nodex-Iv': parsed.iv,
-                  'X-Nodex-Key-Id': parsed.keyId,
-                  'X-Nodex-Validated-At': String(parsed.validatedAt),
-                },
-              }),
-              parsed.seq,
-              ttl_ms,
-              parsed.validatedAt
-            )
-            updateSeq(key, parsed.seq)
-            // Update obs_s barrier after successful peer-fetch (monotone advance)
-            observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, parsed.seq))
-            // Best-effort IDB persistence for monotonic read barrier (IMPL-02)
-            // Sentinel pattern: __obs_v:{key} in nodex-meta store; seq = observed version
-            getDb().then(db => db.put(META_STORE, {
-              path: '__obs_v:' + key,
-              seq: observedVersionMap.get(key) ?? 0,
-              accessed_at: Date.now(),
-              byte_size: 0,
-            })).catch(() => {})
-            resolve(
-              new Response(new TextDecoder().decode(plaintext), {
-                status: 200,
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-Nodex-Seq': String(parsed.seq),
-                },
-              })
-            )
-          })
-          .catch((err: unknown) => {
-            console.warn('[SW] tryPeerFetch decrypt failed:', err)
-            resolve(null)
-          })
-      } else {
-        resolve(null)
+function shareableRequest(request: Request): boolean {
+  const url = new URL(request.url)
+  return durableState && isPublicPath(url.pathname) && !url.search &&
+    !request.headers.has('Authorization') && !request.headers.has('Cookie') &&
+    !['no-store', 'reload', 'no-cache'].includes(request.cache) &&
+    !/no-store|no-cache/i.test(request.headers.get('Cache-Control') ?? '')
+}
+function shareableResponse(response: Response): boolean {
+  const vary = (response.headers.get('Vary') ?? '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean)
+  return response.headers.get('X-Nodex-Cache-Scope') === 'public' &&
+    decodeProof(response.headers.get(PROOF_HEADER))?.scope === 'public' &&
+    !/private|no-store/i.test(response.headers.get('Cache-Control') ?? '') &&
+    !response.headers.has('Set-Cookie') &&
+    vary.every(value => value === 'origin' || value === 'accept-encoding')
+}
+async function hydrateKey(key: string): Promise<void> {
+  await boot()
+  if (!durableState || hydratedKeys.has(key)) return
+  try {
+    const db = await getDb()
+    for (const prefix of ['__obs_v:', '__inv_v:']) {
+      const entry = await db.get(META_STORE, prefix + key)
+      if (entry && Number.isSafeInteger(entry.seq) && entry.seq > 0) {
+        if (prefix === '__obs_v:') observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, entry.seq))
+        updateSeq(key, entry.seq)
       }
     }
-
-    // Transfer port1 to the page; page replies on it, SW receives via port2.onmessage
-    clients[0].postMessage({ type: 'P2P_FETCH', key }, [channel.port1])
+    hydratedKeys.add(key)
+  } catch { durableState = false }
+}
+const hydratedKeys = new Set<string>()
+function admitted(key: string, seq: number, validatedAt: number, peer: boolean): boolean {
+  if (!isFresh(key, seq)) return false
+  if (!peer) return seq >= (observedVersionMap.get(key) ?? 0)
+  return admitCandidate({ candidate: { key, version: seq, updatedAt: validatedAt, class: 'fresh-dynamic' },
+    policy: peerReadsPolicyFromScore(scoreCache.get(key) ?? VOL_COLD_START),
+    sessionObservedVersion: observedVersionMap.get(key) ?? 0,
+    latestKnownVersion: getLatestSeq(key), now: Date.now() }).admitted
+}
+async function acceptResponse(key: string, response: Response, start: number,
+  source: 'sw-cache' | 'peer-fetch' | 'server-fallback', store: boolean, signal?: AbortSignal,
+  requestId: string = crypto.randomUUID(),
+  trackPublicVersion = true,
+): Promise<Response | null> {
+  const seq = Number(response.headers.get('X-Nodex-Seq'))
+  const validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
+  if (!Number.isSafeInteger(seq) || seq < 1 || !Number.isSafeInteger(validatedAt) || validatedAt < 1) return null
+  const decoded = await decryptPayloadResponse(key, response, seq)
+  if (!decoded.ok) return decoded
+  const proof = decodeProof(response.headers.get(PROOF_HEADER))!
+  const current = () => domainOf(proof) === publisherDomain
+  const allowed = () => current() && !signal?.aborted && (!trackPublicVersion || admitted(key, seq, validatedAt, source !== 'server-fallback'))
+  if (!allowed()) {
+    if (current() && trackPublicVersion && source === 'server-fallback' && seq < (observedVersionMap.get(key) ?? 0)) {
+      await emitMetric({ type: 'admission-rejected', key, latency_ms: self.performance.now() - start,
+        rejection_reason: 'below-session-observed', rejection_source: 'server' })
+    }
+    return null
+  }
+  if (store && trackPublicVersion && shareableResponse(response)) {
+    await putCachedEntry(key, response, seq, deriveTTL(classifyTier(scoreCache.get(key) ?? VOL_COLD_START)), validatedAt, current)
+  }
+  // All awaits can admit a newer concurrent value. Recheck at commit and delivery.
+  if (!allowed()) return null
+  if (trackPublicVersion) {
+    updateSeq(key, seq)
+    observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, seq))
+    await persistBarrier(key, '__obs_v:')
+  }
+  if (!allowed()) return null
+  decoded.headers.set('X-Nodex-Request-Id', requestId)
+  decoded.headers.set('X-Nodex-Source', source)
+  decoded.headers.set('X-Nodex-Consistency', trackPublicVersion ? durableState ? 'public-monotonic-durable' : 'origin-only-volatile' : 'origin-verified')
+  void (async () => {
+    try {
+      const db = await getDb()
+      const tx = db.transaction(VOLATILITY_STORE, 'readwrite')
+      const entry = recordActivity(key, await tx.store.get(key), 'read')
+      await tx.store.put(entry)
+      await tx.done
+      scoreCache.set(key, computeScore(entry))
+    } catch { /* Optimization history must not block delivery. */ }
+  })()
+  void emitMetric({ type: source, key, latency_ms: self.performance.now() - start,
+    request_id: requestId, delivered_bytes: Number(decoded.headers.get('Content-Length')) })
+  return decoded
+}
+async function handleRequest(request: Request): Promise<Response> {
+  const key = new URL(request.url).pathname
+  const start = self.performance.now()
+  const requestId = crypto.randomUUID()
+  const mode = request.headers.get('X-Nodex-Read-Mode')
+  await hydrateKey(key)
+  const shared = shareableRequest(request)
+  const cached = shared && mode !== 'origin' && mode !== 'peer' && !runtimeFlags.disableCacheRead ? await getCachedEntry(key) : null
+  if (cached) {
+    const accepted = await acceptResponse(key, cached.response, start, 'sw-cache', false, undefined, requestId)
+    if (accepted?.ok) {
+      void touchAccessedAt(key)
+      return accepted
+    }
+    // Invalid cached content must not trap the user in repeated local failures.
+  }
+  if (shared && mode !== 'origin' && mode !== 'cache' && !runtimeFlags.disableP2P && (scoreCache.get(key) ?? VOL_COLD_START) < VOL_P2P_GATE) {
+    const peer = await tryPeerFetch(key, start, requestId)
+    if (peer) return peer
+  }
+  return fetchAndCache(request, key, start, shared && mode !== 'origin', requestId)
+}
+async function tryPeerFetch(key: string, start: number, requestId: string): Promise<Response | null> {
+  const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: false })
+  if (!clients.length) return null
+  return new Promise(resolve => {
+    const abort = new AbortController()
+    const channels: MessageChannel[] = []
+    let finished = false
+    const finish = (response: Response | null) => {
+      if (finished) return
+      finished = true
+      abort.abort()
+      clearTimeout(timer)
+      for (const channel of channels) { channel.port1.close(); channel.port2.close() }
+      resolve(response)
+    }
+    const timer = setTimeout(() => finish(null), P2P_FETCH_TIMEOUT_MS)
+    // Followers may answer not-found; wait for the leader or the full deadline.
+    for (const client of clients.slice(0, 16)) {
+      const channel = new MessageChannel()
+      channels.push(channel)
+      channel.port2.onmessage = async event => {
+        if (finished || event.data?.type !== 'P2P_FETCH_RESPONSE' || !event.data.found ||
+          typeof event.data.payload !== 'string' || event.data.payload.length > 2 * 1024 * 1024) return
+        try {
+          const p = JSON.parse(event.data.payload) as Record<string, unknown>
+          if (![p.ciphertext, p.iv, p.keyId, p.proof].every(value => typeof value === 'string')) return
+          if (!Number.isSafeInteger(p.seq) || !Number.isSafeInteger(p.validatedAt)) return
+          if (decodeProof(p.proof as string)?.scope !== 'public') return
+          const candidate = new Response(p.ciphertext as string, { headers: {
+            'Content-Type': 'text/plain', 'X-Nodex-Seq': String(p.seq),
+            'X-Nodex-Validated-At': String(p.validatedAt), 'X-Nodex-Iv': p.iv as string,
+            'X-Nodex-Key-Id': p.keyId as string, [PROOF_HEADER]: p.proof as string,
+            'X-Nodex-Cache-Scope': 'public',
+          } })
+          const accepted = await acceptResponse(key, candidate, start, 'peer-fetch', true, abort.signal, requestId)
+          if (accepted?.ok && !finished) finish(accepted)
+        } catch { /* Invalid/unavailable peers leave the origin fallback available. */ }
+      }
+      try { client.postMessage({ type: 'P2P_FETCH', key }, [channel.port1]) }
+      catch { /* Another tab may have closed between discovery and dispatch. */ }
+    }
   })
 }
-
-// ---------------------------------------------------------------------------
-// fetchAndCache — network fetch + write via cache.ts + emit server-fallback metric
-// ---------------------------------------------------------------------------
-
-async function fetchAndCache(
-  request: Request,
-  key: string,
-  start: number
-): Promise<Response> {
-  const observedVersion = observedVersionMap.get(key) ?? 0
-  let response: Response | null = null
-  let seq = 0
-  let validatedAt = 0
-
-  // A CDN or lagging replica can return an older value even on the server path.
-  // Retry once with browser HTTP caching disabled, then fail closed rather than
-  // violate the session's monotonic-read barrier.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+async function fetchAndCache(request: Request, key: string, start: number, store = false, requestId: string = crypto.randomUUID()): Promise<Response> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let response: Response
     try {
-      const originRequest = attempt === 0
-        ? request
-        : new Request(request, { cache: 'no-store' })
-      response = await fetch(originRequest)
-    } catch (err) {
-      console.error('[SW] Network fetch failed:', err)
-      return new Response('Network error', { status: 502 })
+      response = await fetch(new Request(request, {
+        ...(attempt ? { cache: 'no-store' } : {}), signal: AbortSignal.timeout(5_000),
+      }))
+    } catch { return new Response('Origin unavailable', { status: 502 }) }
+    if (!response.ok) return response
+    if (response.type === 'opaque') return new Response('Authoritative version unavailable', { status: 503 })
+    const metadata = admitAuthoritativeMetadata(response.headers.get('X-Nodex-Seq'),
+      response.headers.get('X-Nodex-Validated-At'), 0)
+    if (metadata.admitted) {
+      const url = new URL(request.url)
+      const canonical = !url.search && !request.headers.has('Authorization') && !request.headers.has('Cookie') && shareableResponse(response)
+      const accepted = await acceptResponse(key, response, start, 'server-fallback', store, undefined, requestId, canonical)
+      if (accepted) return accepted
+    } else {
+      await emitMetric({ type: 'admission-rejected', key, latency_ms: self.performance.now() - start,
+        rejection_reason: metadata.reason, rejection_source: 'server' })
     }
-
-    if (!response.ok) {
-      console.warn('[SW] Server returned non-ok status:', response.status, 'for', key)
-      return response
-    }
-    if (response.type === 'opaque') {
-      console.warn('[SW] Opaque response cannot prove version for:', key)
-      return new Response('Authoritative version unavailable', { status: 503 })
-    }
-
-    const versionDecision = admitAuthoritativeMetadata(
-      response.headers.get('X-Nodex-Seq'),
-      response.headers.get('X-Nodex-Validated-At'),
-      observedVersion
-    )
-    if (versionDecision.admitted) {
-      seq = versionDecision.version
-      validatedAt = versionDecision.validatedAt
-      break
-    }
-
-    const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
-    void emitMetric({
-      type: 'admission-rejected',
-      key,
-      latency_ms,
-      rejection_reason: versionDecision.reason,
-      rejection_source: 'server',
-    })
-    console.warn(
-      '[SW] authoritative version rejected:',
-      key,
-      'reason=', versionDecision.reason,
-      'observed=', observedVersion,
-      'attempt=', attempt + 1
-    )
   }
-
-  if (!response || seq === 0 || validatedAt === 0) {
-    return new Response('Fresh authoritative version unavailable', {
-      status: 503,
-      headers: { 'Retry-After': '1', 'X-Nodex-Min-Version': String(observedVersion) },
-    })
-  }
-
-  // Derive TTL from current volatility score and pass to putCachedEntry (CR-02)
-  // putCachedEntry skips caching entirely when ttl_ms === 0 (ephemeral tier)
-  const currentScore = scoreCache.get(key) ?? VOL_COLD_START
-  const tier = classifyTier(currentScore)
-  const ttl_ms = deriveTTL(tier)
-
-  // Store in Cache Storage + IDB via cache.ts (handles LRU eviction, response.clone())
-  await putCachedEntry(key, response, seq, ttl_ms, validatedAt)
-
-  // Update in-memory seq map (self-seeding — D-09)
-  updateSeq(key, seq)
-  // Update obs_s barrier after server fetch — server version is authoritative
-  observedVersionMap.set(key, observeVersion(observedVersionMap.get(key) ?? 0, seq))
-  // Best-effort IDB persistence for monotonic read barrier (IMPL-02)
-  // Sentinel pattern: __obs_v:{key} in nodex-meta store; seq = observed version
-  getDb().then(db => db.put(META_STORE, {
-    path: '__obs_v:' + key,
-    seq: observedVersionMap.get(key) ?? 0,
-    accessed_at: Date.now(),
-    byte_size: 0,
-  })).catch(() => {})
-
-  // Emit server-fallback metric (D-14)
-  const latency_ms = Math.round((self.performance.now() - start) * 100) / 100
-  await emitMetric({ type: 'server-fallback', key, latency_ms })
-
-  console.log('[SW] server-fallback cached:', key, 'seq=', seq)
-  return decryptPayloadResponse(key, response, seq)
+  return new Response('Fresh authoritative version unavailable', { status: 503,
+    headers: { 'Retry-After': '1', 'X-Nodex-Min-Version': String(observedVersionMap.get(key) ?? 0) } })
 }

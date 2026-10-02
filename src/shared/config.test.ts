@@ -22,8 +22,8 @@ describe('shared/config', () => {
     expect(CACHE_URL_PREFIX).toBe('/api/')
   })
 
-  it('CACHE_MAX_BYTES is 31457280 (30MB)', () => {
-    expect(CACHE_MAX_BYTES).toBe(31457280)
+  it('CACHE_MAX_BYTES is 10485760 (10MiB)', () => {
+    expect(CACHE_MAX_BYTES).toBe(10485760)
   })
 
   it('META_STORE is nodex-meta', () => {

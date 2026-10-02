@@ -5,11 +5,11 @@ import { test, expect, Browser, BrowserContext, Page } from '@playwright/test'
 //
 // Infrastructure (same as phase-03):
 //   - Vite preview server:     http://localhost:4173
-//   - Hono mock API:           http://localhost:3001
+//   - Hono mock API:           http://localhost:33001
 //   - Signaling server (P2P):  http://localhost:3002
 //
 // Test strategy: each test sends gossip invalidation events via POST /api/gossip-seed
-// (mock-api on 3001), then reads IDB VOLATILITY_STORE and window.__volatilityScores
+// (mock-api on 33001), then reads IDB VOLATILITY_STORE and window.__volatilityScores
 // to verify the volatility classifier behavior end-to-end.
 
 // ---------------------------------------------------------------------------
@@ -36,25 +36,29 @@ async function waitForPeerManager(page: Page): Promise<void> {
 
 /**
  * Trigger N gossip invalidation events for a given key.
- * Uses POST /api/gossip-seed (mock-api endpoint on port 3001, proxied via Vite).
+ * Uses POST /api/gossip-seed (mock-api endpoint on port 33001, proxied via Vite).
  * Seq values start at startSeq and increment by 1 per call.
  * Waits 150ms between events to allow SW GOSSIP_INVALIDATE processing.
  */
 async function triggerInvalidations(
   page: Page,
   key: string,
-  startSeq: number,
   count: number
 ): Promise<void> {
   for (let i = 0; i < count; i++) {
     await page.evaluate(
-      ({ key, seq }: { key: string; seq: number }) =>
-        fetch('/api/gossip-seed', {
+      async (key: string) => {
+        const mutation = await fetch('/api/invalidate' + key, { method: 'POST' })
+        if (!mutation.ok) throw new Error('Authoritative mutation failed')
+        const { newSeq: seq } = await mutation.json()
+        const seeded = await fetch('/api/gossip-seed', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ path: key, seq }),
-        }).then((r) => r.status),
-      { key, seq: startSeq + i }
+        })
+        if (!seeded.ok) throw new Error('Signed invalidation seed failed')
+      },
+      key
     )
     await page.waitForTimeout(150)
   }
@@ -150,7 +154,7 @@ test('VOL-06: GOSSIP_INVALIDATE triggers ledger write to VOLATILITY_STORE', asyn
     await page.waitForTimeout(300)
 
     // Trigger a single gossip invalidation (seq=100 to avoid collision with phase-03 tests)
-    await triggerInvalidations(page, key, 100, 1)
+    await triggerInvalidations(page, key, 1)
 
     // Poll IDB until the VOLATILITY_STORE entry appears (up to 5s)
     const entry = await expect
@@ -186,15 +190,16 @@ test('VOL-01: volatility ledger entry has correct schema fields', async ({ brows
     // Seed at least one invalidation to ensure a ledger entry exists
     await page.evaluate(() => fetch('/api/products/1').then((r) => r.status))
     await page.waitForTimeout(200)
-    await triggerInvalidations(page, key, 200, 1)
+    await triggerInvalidations(page, key, 1)
 
     // Wait for IDB write
-    const entry = await expect
+    await expect
       .poll(
         () => readVolatilityEntry(page, key),
         { timeout: 5000, intervals: [300, 500, 1000] }
       )
       .not.toBeNull()
+    const entry = await readVolatilityEntry(page, key)
 
     // VOL-01: entry must have the correct VolatilityEntry schema fields
     expect(entry).not.toBeNull()
@@ -228,7 +233,7 @@ test('VOL-02: computed score is in [0,1] range after invalidation', async ({ bro
     // Trigger invalidation to populate scoreCache and window.__volatilityScores
     await page.evaluate(() => fetch('/api/products/1').then((r) => r.status))
     await page.waitForTimeout(200)
-    await triggerInvalidations(page, key, 300, 1)
+    await triggerInvalidations(page, key, 1)
 
     // Wait for window.__volatilityScores to contain the key (up to 5s)
     await expect
@@ -283,7 +288,7 @@ test('VOL-05: key with 10+ invalidations reaches ephemeral tier (score >= 0.8)',
 
     // Trigger 10 invalidations — this should push change_count to VOL_CHANGE_BASELINE (10)
     // and score to >= VOL_P2P_GATE (0.8), classifying as 'ephemeral'
-    await triggerInvalidations(page, key, 400, 10)
+    await triggerInvalidations(page, key, 10)
 
     // Wait for window.__volatilityScores to reflect the updated score
     await expect
@@ -333,7 +338,7 @@ test('VOL-04: volatility-panel shows tier string after invalidation', async ({ b
     await page.waitForTimeout(200)
 
     // Send one invalidation to trigger a volatility-update BroadcastChannel event
-    await triggerInvalidations(page, key, 500, 1)
+    await triggerInvalidations(page, key, 1)
 
     // Wait for window.__volatilityScores to be populated
     await expect

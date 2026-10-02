@@ -54,7 +54,8 @@ export class InMemoryInvalidationOutbox implements InvalidationOutbox {
     assertSequenceUuid(eventId)
     assertOutboxWorkerId(workerId)
     const event = this.state.outbox.get(`${this.tenantId}:${eventId}`)
-    if (!event || event.deliveredAt !== undefined || event.lockedBy !== workerId) return false
+    if (!event || event.deliveredAt !== undefined || event.lockedBy !== workerId ||
+      event.lockedUntil === undefined || event.lockedUntil <= this.now()) return false
     event.deliveredAt = this.now()
     event.lockedBy = undefined
     event.lockedUntil = undefined
@@ -67,7 +68,8 @@ export class InMemoryInvalidationOutbox implements InvalidationOutbox {
     assertOutboxWorkerId(workerId)
     assertOutboxRetry(delayMs, error)
     const event = this.state.outbox.get(`${this.tenantId}:${eventId}`)
-    if (!event || event.deliveredAt !== undefined || event.lockedBy !== workerId) return false
+    if (!event || event.deliveredAt !== undefined || event.lockedBy !== workerId ||
+      event.lockedUntil === undefined || event.lockedUntil <= this.now()) return false
     event.availableAt = this.now() + delayMs
     event.lockedBy = undefined
     event.lockedUntil = undefined

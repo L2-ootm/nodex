@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeScore, classifyTier, deriveTTL } from './volatility.js'
+import { computeScore, classifyTier, deriveTTL, recordActivity } from './volatility.js'
 import {
   VOL_TTL_STABLE_MS,
   VOL_TTL_VOLATILE_MS,
@@ -14,6 +14,17 @@ import {
 const NOW = 1_000_000_000_000
 const FAR_PAST = NOW - VOL_DECAY_WINDOW_MS * 10  // well beyond the decay window → recency_decay = 0
 const TWO_MIN_AGO = NOW - 2 * 60 * 1000           // 2 minutes before NOW
+
+describe('bounded activity windows', () => {
+  it('counts reads across all paths and lets historical churn expire', () => {
+    let entry = recordActivity('/api/products/1', undefined, 'change', NOW)
+    entry = recordActivity(entry.key, entry, 'read', NOW + 1)
+    expect(entry).toMatchObject({ change_count: 1, access_count: 1 })
+    const expired = recordActivity(entry.key, entry, 'read', NOW + VOL_DECAY_WINDOW_MS)
+    expect(expired).toMatchObject({ change_count: 0, access_count: 1 })
+    expect(computeScore(expired, NOW + VOL_DECAY_WINDOW_MS)).toBeLessThan(0.4)
+  })
+})
 
 describe('classifyTier', () => {
   it('maps 0 to stable', () => {

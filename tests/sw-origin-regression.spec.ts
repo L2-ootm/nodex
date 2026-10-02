@@ -16,8 +16,8 @@ test.describe('SW monotonic origin fallback', () => {
     // Service Worker observe version 3 from the authoritative path.
     await page.evaluate((path) => fetch(path), key)
     await page.evaluate(async (path) => {
-      await fetch(`http://localhost:3001/api/invalidate/${path}`, { method: 'POST' })
-      await fetch(`http://localhost:3001/api/invalidate/${path}`, { method: 'POST' })
+      await fetch(`http://localhost:33001/api/invalidate/${path}`, { method: 'POST' })
+      await fetch(`http://localhost:33001/api/invalidate/${path}`, { method: 'POST' })
     }, invalidatePath)
     await page.evaluate(() => caches.delete('nodex-v1'))
     await page.evaluate((path) => fetch(path), key)
@@ -32,7 +32,7 @@ test.describe('SW monotonic origin fallback', () => {
     // The local mock encrypts a version-2 body while its real counter remains 3.
     // Both the normal attempt and the single no-store retry must be rejected.
     const result = await page.evaluate(async (path) => {
-      const response = await fetch(`${path}?__nodex_test_seq=2`)
+      const response = await fetch(path, { cache: 'no-store', headers: { 'X-Nodex-Test-Seq': '2' } })
       return {
         status: response.status,
         body: await response.text(),

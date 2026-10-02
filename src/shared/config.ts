@@ -3,7 +3,7 @@
 
 export const CACHE_URL_PREFIX = '/api/'
 export const CACHE_NAME = 'nodex-v1'
-export const CACHE_MAX_BYTES = 30 * 1024 * 1024  // 30MB hard cap (D-11)
+export const CACHE_MAX_BYTES = 10 * 1024 * 1024  // Effective body-byte budget for the opt-in pool
 export const CACHE_MAX_ENTRIES = 500              // LRU entry budget (discretionary)
 
 export const IDB_NAME = 'nodex-db'
@@ -22,6 +22,7 @@ export const DEFAULT_SIGNALING_URL = `ws://localhost:${SIGNALING_PORT}/ws`
 export const SIGNALING_URL = DEFAULT_SIGNALING_URL
 export const DEFAULT_SIGNALING_ROOM = 'default'
 export const PEER_FANOUT = 3
+export const MAX_PEER_CONNECTIONS = 12 // outbound selection plus bounded inbound edges
 export const P2P_FETCH_TIMEOUT_MS = 200
 export const DC_GOSSIP_ID = 0
 export const DC_CACHE_FETCH_ID = 1

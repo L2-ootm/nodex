@@ -2,9 +2,9 @@ export type BetaTokenRole = 'tester' | 'admin'
 
 function parseTesterTokens(): string[] {
   const raw = process.env['NODEX_BETA_TOKENS'] ?? ''
-  return raw.split(/,(?=nodex-)/)
+  return splitTokenEntries(raw)
     .map((entry) => entry.trim().split('|')[0]?.trim() ?? '')
-    .filter((t) => t.startsWith('nodex-') && t.length > 0)
+    .filter(Boolean)
 }
 
 function parseAdminTokens(): string[] {
@@ -14,18 +14,22 @@ function parseAdminTokens(): string[] {
     .filter(Boolean)
 }
 
-export function validateBetaToken(req: Request, role: BetaTokenRole): boolean {
+export async function validateBetaToken(req: Request, role: BetaTokenRole): Promise<boolean> {
   const header = req.headers.get('Authorization') ?? ''
   if (!header.startsWith('Bearer ')) return false
   const token = header.slice(7).trim()
   if (!token) return false
 
   const admins = parseAdminTokens()
-  if (admins.includes(token)) return true          // admin passes all roles
+  if (matchesEnvironmentToken(admins, token)) return true
 
-  if (role === 'admin') return false               // non-admin token rejected for admin role
-
-  return parseTesterTokens().includes(token)
+  if (role === 'tester' && matchesEnvironmentToken(parseTesterTokens(), token)) return true
+  try {
+    const store = createConfiguredBetaStore(process.env['NODEX_BETA_DATA_DIR'] ?? (process.env['VERCEL'] === '1' ? '/tmp/nodex-beta-data' : 'beta-data'))
+    const hash = createHash('sha256').update(token).digest('hex')
+    const record = await store.findToken(hash)
+    return !!record && isTokenUsable(record) && (role === 'tester' || record.role === 'admin')
+  } catch { return false }
 }
 
 export function unauthorizedResponse(): Response {
@@ -33,4 +37,13 @@ export function unauthorizedResponse(): Response {
     status: 401,
     headers: { 'Content-Type': 'application/json' },
   })
+}
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { createConfiguredBetaStore, isTokenUsable, splitTokenEntries } from '../../src/server/beta-coordinator.js'
+
+function matchesEnvironmentToken(tokens: string[], token: string): boolean {
+  const digest = createHash('sha256').update(token).digest()
+  let matched = false
+  for (const candidate of tokens) matched = timingSafeEqual(digest, createHash('sha256').update(candidate).digest()) || matched
+  return matched
 }

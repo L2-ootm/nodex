@@ -3,7 +3,7 @@
 // POC infrastructure only: role-token gated sessions, local JSONL evidence,
 // simulated run orchestration, tester log capture, and contributor ledger export.
 
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -13,6 +13,8 @@ import { serve } from '@hono/node-server'
 import { get, put } from '@vercel/blob'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { DEFAULT_SIGNALING_URL } from '../shared/config.js'
+import { withLocalTransaction, readSnapshot, writeSnapshot, writeAtomicText } from './local-transaction.js'
+import { bodyLimit } from 'hono/body-limit'
 
 export type BetaEvidenceResult = 'pass' | 'partial' | 'fail' | 'not_measured'
 export type BetaTokenRole = 'admin' | 'tester'
@@ -226,7 +228,22 @@ export interface BetaCoordinatorOptions {
   allowedOrigins?: string[]
 }
 
+export interface BetaPresence {
+  tokenHash: string
+  name: string
+  role: BetaTokenRole
+  mode: string
+  lastSeen: string
+  participantId?: string
+  roomId?: string
+}
+
 export interface BetaStore {
+  findToken(tokenHash: string): Promise<BetaTokenRecord | null>
+  upsertPresence(entry: BetaPresence): Promise<void>
+  readPresence(since: string, roomId?: string): Promise<BetaPresence[]>
+  enroll(input: BetaParticipantInput, sessionToken: string, requestId: string,
+    invite?: BetaTokenRecord): Promise<BetaParticipantRecord | null>
   createParticipant(input: BetaParticipantInput, invite?: Pick<BetaTokenRecord, 'tokenId' | 'tokenHash' | 'label'>): Promise<BetaParticipantRecord>
   createSession(participant: Pick<BetaParticipantRecord, 'participantId' | 'roomId'>, sessionToken: string): Promise<BetaSessionRecord>
   readSession(sessionToken: string): Promise<BetaSessionRecord | null>
@@ -291,6 +308,7 @@ function uuidOrNull(value: string | undefined): string | null {
 }
 
 function sanitizeParticipantInput(value: unknown): BetaParticipantInput | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const input = value as Record<string, unknown>
   const name = nonEmptyString(input['name'])
   if (!name) return null
@@ -307,6 +325,7 @@ function sanitizeParticipantInput(value: unknown): BetaParticipantInput | null {
 }
 
 function sanitizeEvidenceInput(value: unknown): BetaEvidenceInput | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const input = value as Record<string, unknown>
   const participantId = nonEmptyString(input['participantId'])
   const roomId = nonEmptyString(input['roomId'])
@@ -347,6 +366,7 @@ function sanitizeTokenCreateInput(value: unknown): {
   welcomeNote?: string
   maxSessions: number
 } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) value = {}
   const input = value as Record<string, unknown>
   const role = sanitizeRole(input['role'])
   const assignedName = nonEmptyString(input['assignedName'])?.slice(0, 120)
@@ -367,6 +387,7 @@ function sanitizeTokenCreateInput(value: unknown): {
 }
 
 function sanitizeRunInput(value: unknown): BetaRunInput | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const input = value as Record<string, unknown>
   const scenario = nonEmptyString(input['scenario'])
   const dataType = nonEmptyString(input['dataType'])
@@ -383,6 +404,7 @@ function sanitizeRunInput(value: unknown): BetaRunInput | null {
 }
 
 function sanitizeLogInput(value: unknown): BetaLogInput | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const input = value as Record<string, unknown>
   const level = input['level']
   const message = nonEmptyString(input['message'])
@@ -424,7 +446,7 @@ async function writeJsonl(filePath: string, records: unknown[]): Promise<void> {
     return
   }
   await mkdir(path.dirname(filePath), { recursive: true })
-  await writeFile(filePath, text)
+  await writeAtomicText(filePath, text)
 }
 
 async function readJsonl<T>(filePath: string): Promise<T[]> {
@@ -467,6 +489,8 @@ async function readBlobJsonlText(filePath: string): Promise<string> {
 }
 
 export function createBetaStore(dataDir: string): BetaStore {
+  const enrollmentsPath = path.join(dataDir, 'enrollments.json')
+  type Enrollment = { requestId: string; participant: BetaParticipantRecord; session: BetaSessionRecord }
   const participantsPath = path.join(dataDir, 'participants.jsonl')
   const evidencePath = path.join(dataDir, 'evidence.jsonl')
   const tokensPath = path.join(dataDir, 'tokens.jsonl')
@@ -478,6 +502,54 @@ export function createBetaStore(dataDir: string): BetaStore {
   const authAttemptsPath = path.join(dataDir, 'auth-attempts.jsonl')
 
   return {
+    async findToken(tokenHash) {
+      return (await this.readTokens()).find(token => token.tokenHash === tokenHash) ?? null
+    },
+    async upsertPresence(entry) {
+      if (useBlobStore()) throw new Error('Atomic presence requires Supabase in hosted mode')
+      await withLocalTransaction(dataDir, async () => {
+        const file = path.join(dataDir, 'presence.json')
+        const cutoff = new Date(Date.now() - 180_000).toISOString()
+        const records = (await readSnapshot<BetaPresence>(file)).filter(record =>
+          record.lastSeen > cutoff && !(record.tokenHash === entry.tokenHash && (record.roomId ?? '') === (entry.roomId ?? '')))
+        if (records.length >= 1000) throw new Error('Presence capacity exceeded')
+        records.push(entry)
+        await writeSnapshot(file, records)
+      })
+    },
+    async readPresence(since, roomId) {
+      return (await readSnapshot<BetaPresence>(path.join(dataDir, 'presence.json')))
+        .filter(entry => entry.lastSeen > since && (!roomId || entry.roomId === roomId))
+    },
+    async enroll(input, sessionToken, requestId, invite) {
+      if (useBlobStore()) throw new Error('Atomic enrollment requires Supabase in hosted mode')
+      return withLocalTransaction(dataDir, async () => {
+        if (invite && invite.createdBy !== 'env') {
+          const current = await this.findToken(invite.tokenHash)
+          if (!current || !isTokenUsable(current)) return null
+          invite = current
+        }
+        const records = await readSnapshot<Enrollment>(enrollmentsPath)
+        const duplicate = records.find(record => record.requestId === requestId)
+        if (duplicate) return duplicate.participant
+        if (invite) {
+          const inviteHash = invite.tokenHash
+          const legacy = await readJsonl<BetaParticipantRecord>(participantsPath)
+          const used = [...legacy, ...records.map(r => r.participant)].filter(p => p.inviteTokenHash === inviteHash).length
+          if (used >= invite.maxSessions) return null
+        }
+        const participantId = compactId('beta')
+        const participant: BetaParticipantRecord = { ...input, schema_version: 1, participantId,
+          roomId: `beta-${participantId}`, createdAt: new Date().toISOString(),
+          inviteTokenId: invite?.tokenId, inviteTokenHash: invite?.tokenHash, inviteTokenLabel: invite?.label }
+        const session: BetaSessionRecord = { schema_version: 1, sessionTokenHash: hashToken(sessionToken),
+          participantId, roomId: participant.roomId, createdAt: participant.createdAt,
+          expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(), revokedAt: null }
+        records.push({ requestId, participant, session })
+        await writeSnapshot(enrollmentsPath, records)
+        return participant
+      })
+    },
     async createParticipant(input, invite) {
       const participantId = compactId('beta')
       const roomId = `beta-${participantId}`
@@ -517,6 +589,8 @@ export function createBetaStore(dataDir: string): BetaStore {
 
     async readSession(sessionToken) {
       const tokenHash = hashToken(sessionToken)
+      const enrollment = (await readSnapshot<Enrollment>(enrollmentsPath)).find(r => r.session.sessionTokenHash === tokenHash)
+      if (enrollment) return !enrollment.session.revokedAt && new Date(enrollment.session.expiresAt).getTime() > Date.now() ? enrollment.session : null
       const sessions = await readJsonl<BetaSessionRecord>(sessionsPath)
       const found = sessions.find((session) =>
         session.sessionTokenHash === tokenHash &&
@@ -572,7 +646,9 @@ export function createBetaStore(dataDir: string): BetaStore {
         useCount: 0,
       }
       const { token: _token, ...persisted } = record
-      await appendJsonl(tokensPath, persisted)
+      await withLocalTransaction(dataDir, async () => {
+        await writeJsonl(tokensPath, [...await this.readTokens(), persisted])
+      })
       return record
     },
 
@@ -588,7 +664,8 @@ export function createBetaStore(dataDir: string): BetaStore {
     },
 
     async readParticipants() {
-      return await readJsonl<BetaParticipantRecord>(participantsPath)
+      return [...await readJsonl<BetaParticipantRecord>(participantsPath),
+        ...(await readSnapshot<Enrollment>(enrollmentsPath)).map(r => r.participant)]
     },
 
     async createRun(input, createdBy) {
@@ -646,6 +723,7 @@ export function createBetaStore(dataDir: string): BetaStore {
     },
 
     async revokeToken(tokenId, revokedBy) {
+      return withLocalTransaction(dataDir, async () => {
       const tokens = await this.readTokens()
       const revokedAt = new Date().toISOString()
       let revoked: BetaTokenRecord | null = null
@@ -656,9 +734,11 @@ export function createBetaStore(dataDir: string): BetaStore {
       })
       if (revoked) await writeJsonl(tokensPath, next)
       return revoked
+      })
     },
 
     async recordTokenUse(tokenHash, metadata) {
+      await withLocalTransaction(dataDir, async () => {
       const tokens = await this.readTokens()
       let changed = false
       const next = tokens.map((token) => {
@@ -673,6 +753,7 @@ export function createBetaStore(dataDir: string): BetaStore {
         }
       })
       if (changed) await writeJsonl(tokensPath, next)
+      })
     },
 
     async appendAuditEvent(input) {
@@ -726,7 +807,7 @@ export function createBetaStore(dataDir: string): BetaStore {
 
     async readLedger() {
       const [participants, evidence] = await Promise.all([
-        readJsonl<BetaParticipantRecord>(participantsPath),
+        this.readParticipants(),
         readJsonl<BetaEvidenceRecord>(evidencePath),
       ])
 
@@ -918,6 +999,15 @@ function authAttemptFromRow(row: Record<string, unknown>): BetaAuthAttemptRecord
 
 export function createSupabaseBetaStore(client = requireSupabaseClient()): BetaStore {
   return {
+    async enroll(input, sessionToken, requestId, invite) {
+      const result = await client.rpc('nodex_beta_enroll', { p_input: input,
+        p_session_hash: hashToken(sessionToken), p_request_id: requestId,
+        p_invite_hash: invite?.tokenHash ?? null, p_invite_id: uuidOrNull(invite?.tokenId),
+        p_invite_label: invite?.label ?? null, p_max_sessions: invite?.maxSessions ?? null })
+      if (result.error) throw new Error(result.error.message)
+      if (!result.data) return null
+      return participantFromRow(result.data as Record<string, unknown>)
+    },
     async createParticipant(input, invite) {
       const participantId = compactId('beta')
       const roomId = `beta-${participantId}`
@@ -1029,6 +1119,27 @@ export function createSupabaseBetaStore(client = requireSupabaseClient()): BetaS
       return { ...tokenFromRow(assertSupabase(inserted.data as Record<string, unknown> | null, inserted.error)), token }
     },
 
+    async findToken(tokenHash) {
+      const selected = await client.from('beta_tokens').select('*').eq('token_hash', tokenHash).maybeSingle()
+      if (selected.error) throw new Error(selected.error.message)
+      return selected.data ? tokenFromRow(selected.data as Record<string, unknown>) : null
+    },
+    async upsertPresence(entry) {
+      const result = await client.from('beta_presence').upsert({ token_hash: entry.tokenHash,
+        room_id: entry.roomId ?? '', name: entry.name, role: entry.role, mode: entry.mode,
+        last_seen: entry.lastSeen, participant_id: entry.participantId ?? null }, { onConflict: 'token_hash,room_id' })
+      if (result.error) throw new Error(result.error.message)
+    },
+    async readPresence(since, roomId) {
+      let query = client.from('beta_presence').select('*').gt('last_seen', since).limit(1000)
+      if (roomId) query = query.eq('room_id', roomId)
+      const result = await query
+      if (result.error) throw new Error(result.error.message)
+      return (result.data ?? []).map(row => ({ tokenHash: row['token_hash'] as string,
+        roomId: row['room_id'] as string, name: row['name'] as string,
+        role: row['role'] as BetaTokenRole, mode: row['mode'] as string,
+        lastSeen: row['last_seen'] as string, participantId: row['participant_id'] as string | undefined }))
+    },
     async readTokens() {
       const selected = await client.from('beta_tokens').select('*').order('created_at', { ascending: true })
       if (selected.error) throw new Error(selected.error.message)
@@ -1136,23 +1247,9 @@ export function createSupabaseBetaStore(client = requireSupabaseClient()): BetaS
     },
 
     async recordTokenUse(tokenHash, metadata) {
-      const selected = await client
-        .from('beta_tokens')
-        .select('id,use_count')
-        .eq('token_hash', tokenHash)
-        .maybeSingle()
-      if (selected.error) throw new Error(selected.error.message)
-      if (!selected.data) return
-      const row = selected.data as Record<string, unknown>
-      const updated = await client
-        .from('beta_tokens')
-        .update({
-          last_used_at: new Date().toISOString(),
-          last_used_ip: metadata?.ipAddress,
-          last_used_user_agent: metadata?.userAgent,
-          use_count: Number(row['use_count'] ?? 0) + 1,
-        })
-        .eq('id', String(row['id']))
+      const updated = await client.rpc('beta_record_token_use', {
+        p_token_hash: tokenHash, p_ip: metadata?.ipAddress ?? null, p_user_agent: metadata?.userAgent ?? null,
+      })
       if (updated.error) throw new Error(updated.error.message)
     },
 
@@ -1239,7 +1336,10 @@ export function createSupabaseBetaStore(client = requireSupabaseClient()): BetaS
   }
 }
 
-function createConfiguredBetaStore(dataDir: string): BetaStore {
+export function createConfiguredBetaStore(dataDir: string): BetaStore {
+  if ((process.env['NODE_ENV'] === 'production' || process.env['VERCEL'] === '1') && process.env['NODEX_BETA_STORAGE_DRIVER'] !== 'supabase') {
+    throw new Error('Hosted beta storage requires NODEX_BETA_STORAGE_DRIVER=supabase')
+  }
   return process.env['NODEX_BETA_STORAGE_DRIVER'] === 'supabase'
     ? createSupabaseBetaStore()
     : createBetaStore(dataDir)
@@ -1319,9 +1419,9 @@ function extractBearerToken(header: string | undefined): string | null {
   return match?.[1]?.trim() ?? null
 }
 
-function isTokenUsable(record: BetaTokenRecord): boolean {
+export function isTokenUsable(record: BetaTokenRecord): boolean {
   if (!record.active || record.revokedAt) return false
-  if (record.expiresAt && new Date(record.expiresAt).getTime() <= Date.now()) return false
+  if (record.expiresAt && (!Number.isFinite(new Date(record.expiresAt).getTime()) || new Date(record.expiresAt).getTime() <= Date.now())) return false
   return true
 }
 
@@ -1344,6 +1444,8 @@ function buildTestUrl(appOrigin: string, signalingUrl: string, roomId: string): 
 
 export function createBetaCoordinatorApp(options: BetaCoordinatorOptions): Hono {
   const app = new Hono()
+  app.use('*', bodyLimit({ maxSize: 256 * 1024 }))
+  app.onError((_error, c) => c.json({ error: 'beta storage unavailable' }, 503))
   const store = createConfiguredBetaStore(options.dataDir)
   const inviteTokens = new Set(options.inviteTokens.filter((token) => token.trim().length > 0))
   const adminTokens = new Set((options.adminTokens ?? []).filter((token) => token.trim().length > 0))
@@ -1406,7 +1508,7 @@ export function createBetaCoordinatorApp(options: BetaCoordinatorOptions): Hono 
       }
       return { token, tokenHash, role: 'tester' }
     }
-    const created = (await store.readTokens()).find((record) => record.tokenHash === tokenHash)
+    const created = await store.findToken(tokenHash)
     if (created && isTokenUsable(created)) {
       await store.recordTokenUse(tokenHash, meta).catch(() => undefined)
       await store.appendAuthAttempt({ tokenHash, tokenPreview, success: true, ...meta }).catch(() => undefined)
@@ -1487,19 +1589,13 @@ export function createBetaCoordinatorApp(options: BetaCoordinatorOptions): Hono 
       return c.json({ error: 'name is required' }, 400)
     }
 
-    if (auth.record?.role === 'tester') {
-      const participants = await store.readParticipants()
-      const usedSessions = participants.filter((participant) => participant.inviteTokenHash === auth.tokenHash).length
-      if (usedSessions >= auth.record.maxSessions) {
-        return c.json({ error: 'this tester token has already been used' }, 409)
-      }
-    }
-
-    const participant = await store.createParticipant(input, auth.record
-      ? { tokenId: auth.record.tokenId, tokenHash: auth.record.tokenHash, label: auth.record.label }
-      : undefined)
-    const sessionToken = compactId('beta-session')
-    await store.createSession(participant, sessionToken)
+    const idempotencyKey = c.req.header('Idempotency-Key') ?? crypto.randomUUID()
+    if (idempotencyKey.length < 8 || idempotencyKey.length > 160) return c.json({ error: 'invalid idempotency key' }, 400)
+    const requestId = createHmac('sha256', auth.token).update('enroll:' + idempotencyKey).digest('hex')
+    const sessionToken = 'beta-session-' + createHmac('sha256', auth.token).update('session:' + idempotencyKey).digest('hex')
+    const participant = await store.enroll(input, sessionToken, requestId,
+      auth.record?.role === 'tester' ? auth.record : undefined)
+    if (!participant) return c.json({ error: 'this tester token has already been used' }, 409)
     await store.appendAuditEvent({
       eventType: 'beta_session_created',
       actorTokenHash: auth.tokenHash,
@@ -1717,31 +1813,20 @@ export function createBetaCoordinatorApp(options: BetaCoordinatorOptions): Hono 
   })
 
   // ── Presence / lobby ────────────────────────────────────────────────────────
-  // Lightweight heartbeat so testers can see who is online before multi-person
-  // tests. Records are written to presence.jsonl; only entries within the last
-  // 3 minutes are considered online. No auth bypass — every caller must have a
-  // valid invite or admin token.
-
-  const presencePath = path.join(options.dataDir, 'presence.jsonl')
-
-  async function readOnlinePresence(roomId?: string): Promise<Array<{ name: string; role: BetaTokenRole; mode: string; lastSeen: string; participantId?: string; roomId?: string }>> {
-    const all = await readJsonl<{ tokenHash: string; name: string; role: BetaTokenRole; mode: string; lastSeen: string; participantId?: string; roomId?: string }>(presencePath)
-    const cutoffMs = Date.now() - 3 * 60 * 1000
-    const latest = new Map<string, typeof all[0]>()
-    for (const entry of all.filter((item) => !roomId || item.roomId === roomId)) {
-      const existing = latest.get(entry.tokenHash)
-      if (!existing || entry.lastSeen > existing.lastSeen) latest.set(entry.tokenHash, entry)
-    }
-    return Array.from(latest.values())
-      .filter((e) => new Date(e.lastSeen).getTime() > cutoffMs)
-      .map(({ name, role, mode, lastSeen, participantId, roomId }) => ({ name, role, mode, lastSeen, participantId, roomId }))
+  // Use the configured store; failed durable heartbeats return 503.
+  async function readOnlinePresence(roomId?: string): Promise<Array<Omit<BetaPresence, 'tokenHash'>>> {
+    const since = new Date(Date.now() - 180_000).toISOString()
+    return (await store.readPresence(since, roomId))
+      .map(({ tokenHash: _hash, ...entry }) => entry)
       .sort((a, b) => a.name.localeCompare(b.name))
   }
 
   app.post('/api/beta/presence', async (c) => {
     const auth = await authorize(c.req.header('Authorization'), requestMeta(c))
     if (!auth) return c.json({ error: 'invalid token' }, 401)
-    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
+    const input: unknown = await c.req.json().catch(() => null)
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return c.json({ error: 'invalid presence' }, 400)
+    const body = input as Record<string, unknown>
     const name = nonEmptyString(body['name']) ?? auth.record?.assignedName ?? (auth.role === 'admin' ? 'Admin' : 'Tester')
     const mode = nonEmptyString(body['mode']) ?? 'solo'
     const roomId = nonEmptyString(body['roomId'])?.slice(0, 160)
@@ -1755,7 +1840,7 @@ export function createBetaCoordinatorApp(options: BetaCoordinatorOptions): Hono 
       roomId,
       lastSeen: new Date().toISOString(),
     }
-    await appendJsonl(presencePath, entry).catch(() => undefined)
+    await store.upsertPresence(entry)
     const online = await readOnlinePresence(roomId)
     return c.json({ online })
   })
@@ -1805,7 +1890,7 @@ export function parseInviteTokensWithMeta(): { tokens: string[]; tokenMeta: Reco
   for (const entry of splitTokenEntries(raw)) {
     const parts = entry.split('|')
     const token = parts[0]?.trim()
-    if (!token || !token.startsWith('nodex-') || token.length < 20) continue
+    if (!token || token.length > 4096) continue
     tokens.push(token)
     const assignedName = parts[1]?.trim() || undefined
     const assignedEmail = parts[2]?.trim() || undefined
@@ -1817,8 +1902,9 @@ export function parseInviteTokensWithMeta(): { tokens: string[]; tokenMeta: Reco
   return { tokens, tokenMeta }
 }
 
-function splitTokenEntries(raw: string): string[] {
-  return raw.split(/,(?=nodex-)/).map((entry) => entry.trim()).filter(Boolean)
+export function splitTokenEntries(raw: string): string[] {
+  return (raw.includes('|') ? raw.split(/,(?=nodex-)/) : raw.split(','))
+    .map((entry) => entry.trim()).filter(Boolean)
 }
 
 function parseAdminTokens(): string[] {

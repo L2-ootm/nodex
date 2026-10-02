@@ -30,7 +30,7 @@ async function waitForPeerManager(page: Page): Promise<void> {
 // ---------------------------------------------------------------------------
 
 test('CRPT-01: GET /api/products/:id body is AES-GCM ciphertext, not plaintext JSON', async ({ request }) => {
-  const res = await request.get('http://localhost:3001/api/products/1')
+  const res = await request.get('http://localhost:33001/api/products/1')
   expect(res.ok()).toBe(true)
 
   const body = await res.text()
@@ -42,7 +42,7 @@ test('CRPT-01: GET /api/products/:id body is AES-GCM ciphertext, not plaintext J
 
   // Headers must contain IV and key ID
   expect(res.headers()['x-nodex-iv']).toBeDefined()
-  expect(res.headers()['x-nodex-key-id']).toBe('default')
+  expect(res.headers()['x-nodex-key-id']).toMatch(/^aes-[0-9a-f]{24}$/)
 })
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ test.describe('GOSP-01: gossip-seed endpoint returns seededNodeIds', () => {
       await waitForPeerManager(page)
 
       // Direct API call
-      const res = await page.request.post('http://localhost:3001/api/gossip-seed', {
+      const res = await page.request.post('http://localhost:33001/api/gossip-seed', {
         data: { path: '/api/products/1', seq: 2 },
         headers: { 'Content-Type': 'application/json' },
       })
@@ -154,7 +154,7 @@ test.describe('METR-03: gossip-propagation events emitted with correct shape', (
       })
 
       // Trigger gossip seed — may or may not reach pageA via p2p (depends on connection state)
-      await pageA.request.post('http://localhost:3001/api/gossip-seed', {
+      await pageA.request.post('http://localhost:33001/api/gossip-seed', {
         data: { path: '/api/products/1', seq: 3 },
         headers: { 'Content-Type': 'application/json' },
       })
@@ -280,7 +280,7 @@ test.describe('GOSP-05: gossip invalidation propagation smoke test', () => {
       }
 
       // Seed gossip from server
-      await pages[0].request.post('http://localhost:3001/api/gossip-seed', {
+      await pages[0].request.post('http://localhost:33001/api/gossip-seed', {
         data: { path: '/api/products/1', seq: 4 },
         headers: { 'Content-Type': 'application/json' },
       })

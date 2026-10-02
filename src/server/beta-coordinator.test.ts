@@ -15,6 +15,17 @@ describe('beta coordinator auth and evidence capture', () => {
     await rm(dataDir, { recursive: true, force: true })
   })
 
+  it('revocation remains effective under concurrent token accounting and stale enrollment input', async () => {
+    const store = createBetaStore(dataDir)
+    const token = await store.createToken({ role: 'tester', label: 'concurrent', createdBy: 'admin', maxSessions: 1 })
+    await Promise.all(Array.from({ length: 12 }, () => store.recordTokenUse(token.tokenHash)))
+    await Promise.all([store.revokeToken(token.tokenId, 'admin'), store.recordTokenUse(token.tokenHash)])
+    const saved = await store.findToken(token.tokenHash)
+    expect(saved?.active).toBe(false)
+    expect(saved?.useCount).toBeGreaterThanOrEqual(12)
+    expect(await store.enroll({ name: 'Stale invitation', consentToCredit: true }, 'session', 'request-stale', token)).toBeNull()
+  })
+
   it('rejects beta session creation without a valid invite token', async () => {
     const app = createBetaCoordinatorApp({ dataDir, inviteTokens: ['alpha-token'] })
 
@@ -63,7 +74,7 @@ describe('beta coordinator auth and evidence capture', () => {
     expect(body.testUrl).toContain(`nodexRoom=${encodeURIComponent(body.roomId)}`)
     expect(JSON.stringify(body)).not.toContain('alpha-token')
 
-    const participants = await readFile(path.join(dataDir, 'participants.jsonl'), 'utf8')
+    const participants = await readFile(path.join(dataDir, 'enrollments.json'), 'utf8')
     expect(participants).toContain('Ada Tester')
     expect(participants).toContain('consentToCredit')
     expect(participants).not.toContain('alpha-token')

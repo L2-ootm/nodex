@@ -58,7 +58,7 @@ test.describe('METR-06: baseline latency comparison', () => {
 
     // METR-06: server-fallback latency > sw-cache latency
     // (loose assertion — avoids CI timing flakiness on loopback networks)
-    // The server path includes a real HTTP round trip to localhost:3001 plus
+    // The server path includes a real HTTP round trip to localhost:33001 plus
     // IDB writes; the cache path is a Cache Storage lookup with no network.
     expect(baselineLatency).toBeGreaterThan(cachedLatency)
 

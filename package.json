@@ -7,40 +7,46 @@
     "dev": "concurrently --prefix \"[{name}]\" --names \"server,vite\" \"npm run server\" \"npm run dev:vite\"",
     "dev:vite": "vite",
     "server": "tsx src/server/mock-api.ts",
-    "beta:server": "tsx src/server/beta-coordinator.ts",
-    "beta:next:dev": "next dev apps/beta-suite --port 4174",
+    "beta:server": "tsx src/server/local-beta-stack.ts",
+    "beta:runtime": "npm run build && tsx scripts/sync-beta-runtime.ts",
+    "beta:local": "concurrently --names api,app \"npm run beta:server\" \"npm run beta:next:dev\"",
+    "beta:next:dev": "npm run beta:runtime && next dev apps/beta-suite --port 4174",
     "beta:next:build": "tsx scripts/clean-runtime-dist.ts && npm run build && tsx scripts/sync-beta-runtime.ts && next build apps/beta-suite",
     "beta:next:start": "next start apps/beta-suite --port 4174",
     "test:beta-next": "playwright test -c playwright.beta-next.config.ts --project=chromium",
+    "test:beta-real": "playwright test -c playwright.beta-real.config.ts --project=chromium",
     "verify:deployed-p2p": "tsx scripts/verify-deployed-p2p.ts",
     "beta:stack": "concurrently --prefix \"[{name}]\" --names \"api,signal,beta,preview\" \"npm run server\" \"npm run signaling\" \"npm run beta:server\" \"npx vite preview --host 0.0.0.0 --port 4173 --strictPort\"",
     "beta:export-ledger": "tsx scripts/export-beta-ledger.ts",
-    "build": "vite build",
-    "typecheck": "tsc --noEmit",
+    "build": "vite build && tsx scripts/check-runtime-build.ts",
+    "typecheck": "tsc --noEmit && tsc -p src/sw/tsconfig.json && tsc -p tsconfig.server.json && tsc -p apps/beta-suite/tsconfig.json",
     "signaling": "tsx src/server/signaling-server.ts",
     "outbox:worker": "tsx src/server/run-outbox-worker.ts",
     "test:unit": "vitest run",
     "test": "vitest run && playwright test --project=chromium",
     "metrics:export": "tsx scripts/export-metrics.ts",
+    "economics:evaluate": "tsx scripts/evaluate-economics.ts",
+    "keys:generate": "tsx scripts/generate-keys.ts",
+    "config:production": "node --env-file-if-exists=.env --import tsx scripts/check-production-config.ts",
     "validate:external": "playwright test tests/phase-07.spec.ts --project=chromium && npm run metrics:export",
     "stress:external": "playwright test tests/phase-07-stress.spec.ts --project=chromium",
     "stress:external:repeat": "playwright test tests/phase-07-stress.spec.ts --project=chromium --repeat-each=3",
     "demo": "playwright test tests/phase-05.spec.ts tests/phase-06.spec.ts --project=chromium && npm run metrics:export"
   },
   "dependencies": {
-    "@hono/node-server": "1.19.14",
+    "@hono/node-server": "1.19.15",
     "@hono/node-ws": "^1.3.1",
     "@supabase/supabase-js": "^2.106.2",
     "@vercel/blob": "^2.4.0",
-    "hono": "4.12.19",
+    "hono": "4.13.12",
     "idb": "8.0.3",
-    "next": "^16.2.6",
+    "next": "16.3.8",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "ws": "^8.20.1"
+    "ws": "8.22.0"
   },
   "overrides": {
-    "postcss": "8.5.10"
+    "postcss": "8.5.28"
   },
   "devDependencies": {
     "@playwright/test": "1.60.0",
@@ -48,11 +54,11 @@
     "@types/react": "^19.2.6",
     "@types/react-dom": "^19.2.3",
     "@types/serviceworker": "0.0.197",
-    "concurrently": "9.2.1",
-    "tsx": "latest",
+    "concurrently": "9.2.4",
+    "tsx": "4.23.15",
     "typescript": "6.0.3",
-    "vite": "8.0.13",
+    "vite": "8.3.2",
     "vite-plugin-pwa": "1.3.0",
-    "vitest": "4.1.6"
+    "vitest": "4.1.11"
   }
 }

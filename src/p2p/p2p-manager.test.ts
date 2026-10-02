@@ -9,9 +9,14 @@ import {
   pendingRequests,
   peerManager,
   selectConnectedPeer,
+  isPolitePeer,
 } from './p2p-manager.js'
 
 describe('p2p-manager', () => {
+  it('concurrent HTTP discovery assigns opposite negotiation roles to a peer pair', () => {
+    expect(isPolitePeer('node-a', 'node-b')).toBe(false)
+    expect(isPolitePeer('node-b', 'node-a')).toBe(true)
+  })
   beforeEach(() => {
     _resetForTest()
   })
@@ -202,6 +207,7 @@ describe('p2p-manager', () => {
       async addIceCandidate(): Promise<void> {}
       async getStats(): Promise<RTCStatsReport> { return new Map() as unknown as RTCStatsReport }
       restartIce(): void {}
+      close(): void {}
     }
 
     vi.stubGlobal('MessageChannel', TestMessageChannel)
@@ -216,6 +222,10 @@ describe('p2p-manager', () => {
         search: '?nodexRoom=room-a&nodexSignalingUrl=https%3A%2F%2Fsignal.test%2Fapi%2Fsignal',
       },
       setInterval: vi.fn((callback: () => void) => {
+        intervalCallbacks.push(callback)
+        return intervalCallbacks.length
+      }),
+      setTimeout: vi.fn((callback: () => void) => {
         intervalCallbacks.push(callback)
         return intervalCallbacks.length
       }),
@@ -240,7 +250,7 @@ describe('p2p-manager', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/join')) {
-        return new Response(JSON.stringify({ peers: [], polite: false, after: 0 }), {
+        return new Response(JSON.stringify({ peers: [], polite: false, after: 0, nodeGrant: 'grant-a' }), {
           headers: { 'Content-Type': 'application/json' },
         })
       }
@@ -260,5 +270,23 @@ describe('p2p-manager', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(connections.has('node-b')).toBe(true)
+    // Exercise the real failure handler deterministically. This checks bounded
+    // retries and request cleanup; it does not simulate a WAN ICE recovery.
+    const pc = connections.get('node-b')!.pc
+    const restart = vi.spyOn(pc, 'restartIce')
+    const close = vi.spyOn(pc, 'close')
+    const failedReply = vi.fn()
+    const unrelatedReply = vi.fn()
+    pendingRequests.set('failed-request', { peerId: 'node-b', resolver: failedReply })
+    pendingRequests.set('other-request', { peerId: 'other-peer', resolver: unrelatedReply })
+    ;(pc as unknown as { connectionState: string }).connectionState = 'failed'
+    for (let attempt = 0; attempt < 3; attempt++) pc.dispatchEvent(new Event('connectionstatechange'))
+    expect(restart).toHaveBeenCalledTimes(2)
+    expect(close).toHaveBeenCalledOnce()
+    expect(failedReply).toHaveBeenCalledOnce()
+    expect(pendingRequests.has('failed-request')).toBe(false)
+    expect(unrelatedReply).not.toHaveBeenCalled()
+    expect(pendingRequests.has('other-request')).toBe(true)
+    expect(connections.has('node-b')).toBe(false)
   })
 })

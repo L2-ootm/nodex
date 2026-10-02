@@ -9,7 +9,8 @@
 // T-03-04: fresh 12-byte IV generated per encrypt call via crypto.getRandomValues
 // T-03-03: AES-GCM auth tag causes DOMException(OperationError) on tamper/wrong-key — re-thrown to caller
 // T-03-05 (accepted risk): extractable=true for PoC; production should set extractable=false
-// T-03-06: AES-GCM AAD binds key + seq + keyId so freshness metadata cannot be forged.
+// AES-GCM AAD binds metadata against parties without the shared AES key.
+// Publisher-only authenticity is provided separately by publisher-proof.ts.
 
 /**
  * Import a 32-byte raw key as an AES-GCM CryptoKey.

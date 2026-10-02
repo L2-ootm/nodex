@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { betaApiBase, createSession, listPresence, listRooms, postPresence, sendLog, submitEvidence } from '../lib/beta-api'
 import {
   addLog,
+  clearRunEvidence,
   buildLogBundle,
   isRoomOpen,
   readActiveRoom,
@@ -22,6 +23,9 @@ import {
 } from '../lib/storage'
 import type { BetaResult, BetaRoom, BetaSession, PresencePeer, StoredAuth, TesterProfile } from '../lib/types'
 import { PageIntro, TesterLayout } from './AppShell'
+import { MetricDeduplicator } from '../../../src/shared/metric-dedup'
+import { economicLedger, type EconomicRead, type ReadArm } from '../../../src/shared/economic-ledger'
+import { controlSnapshot, type ControlObservation } from '../../../src/shared/control-meter'
 
 type RoomMode = 'solo' | 'duo' | 'group'
 type LiveNodeState = 'ready' | 'connecting' | 'waiting' | 'offline'
@@ -333,11 +337,13 @@ export function RunPage() {
     'Peer manager joined the room',
     'Encrypted origin fetch completed',
     'Cache/P2P transfer metrics captured',
-    'Gossip invalidation seeded',
+    'Invalidation checked or marked unmeasured',
     'Evidence bundle prepared',
   ], [])
 
   async function run() {
+    clearRunEvidence()
+    const runStartedAt = Date.now()
     setStep(0)
     setRunning(true)
     setSummary('Starting real protocol test...')
@@ -353,11 +359,16 @@ export function RunPage() {
       return
     }
 
-    const metricEvents: Array<{ type: string; key?: string; latency_ms?: number }> = []
+    const reads: EconomicRead[] = []
+    const autoRequestIds = new Set<string>()
+    const metricEvents: Array<{ type: string; key?: string; latency_ms?: number; event_id?: string; request_id?: string }> = []
+    const autoMetrics = () => metricEvents.filter(metric => metric.request_id && autoRequestIds.has(metric.request_id))
+    const metricDedup = new MetricDeduplicator()
     const channel = typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('nodex-metrics') : null
     if (channel) {
       channel.onmessage = (event: MessageEvent) => {
-        metricEvents.push(event.data as { type: string; key?: string; latency_ms?: number })
+        const metric = event.data as { type: string; key?: string; latency_ms?: number; event_id?: string; request_id?: string }
+        if (metric && typeof metric.type === 'string' && metricDedup.accept(metric)) metricEvents.push(metric)
       }
     }
 
@@ -373,56 +384,79 @@ export function RunPage() {
       lifecycle = createLifecycleRecorder()
       setRuntimeUrl(runtime)
       const runtimeWindow = await waitForRuntimeFrame(frameRef, runtime)
+      await waitForCondition(() => Boolean(runtimeWindow.navigator.serviceWorker?.controller), 8000)
       setStep(1)
       record('Protocol runtime loaded in this browser.')
 
       await waitForCondition(() => Boolean((runtimeWindow as unknown as Record<string, unknown>)['__peerManagerReady']), 8000)
       setStep(2)
       record(`Peer manager joined ${roomId}.`)
+      const workerControlBefore = await workerControlSnapshot(runtimeWindow, runStartedAt)
 
       const first = await runtimeWindow.fetch('/api/products/1', { cache: 'no-store' })
       if (!first.ok) throw new Error(`origin fetch failed (${first.status})`)
       setStep(3)
       record(`Encrypted origin fetch ok, seq=${first.headers.get('X-Nodex-Seq') ?? '?'}.`)
 
-      for (let i = 0; i < 6; i++) {
-        const productId = (i % 3) + 1
-        const res = await runtimeWindow.fetch(`/api/products/${productId}`)
-        if (!res.ok) throw new Error(`fetch /api/products/${productId} failed (${res.status})`)
-        await sleep(100)
+      const keys = ['/api/products/1', '/api/products/2', '/api/products/3']
+      for (const arm of ['origin-control','sdk-cache','sdk-auto'] as ReadArm[]) {
+        if (arm !== 'origin-control') {
+          for (const key of keys) await evictRuntimeKey(runtimeWindow, key)
+        }
+        for (let i = 0; i < 6; i++) {
+          const key = keys[i % keys.length]!
+          const readStarted = performance.now()
+          const mode = arm === 'origin-control' ? 'origin' : arm === 'sdk-cache' ? 'cache' : 'auto'
+          const response = await runtimeWindow.fetch(key, { headers: { 'X-Nodex-Read-Mode': mode } })
+          if (!response.ok) throw new Error(`fetch ${key} failed (${response.status})`)
+          const body = await response.text()
+          const requestId = response.headers.get('X-Nodex-Request-Id')
+          const source = response.headers.get('X-Nodex-Source')
+          const version = Number(response.headers.get('X-Nodex-Seq'))
+          if (!requestId || !['sw-cache','peer-fetch','server-fallback'].includes(source ?? '') || !Number.isSafeInteger(version) || version < 1) {
+            throw new Error('Verified read attribution is unavailable; this run cannot pass.')
+          }
+          const digestBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))
+          reads.push({ requestId, arm, key, version, source: source as EconomicRead['source'],
+            digest: Array.from(new Uint8Array(digestBytes), byte => byte.toString(16).padStart(2, '0')).join(''),
+            applicationBytes: new TextEncoder().encode(body).byteLength,
+            latencyMs: performance.now() - readStarted })
+          if (arm === 'sdk-auto') autoRequestIds.add(requestId)
+          await sleep(60)
+        }
       }
-      await sleep(600)
-
-      const counts = countMetrics(metricEvents)
+      await sleep(300)
+      const counts = countMetrics(autoMetrics())
       const peerCount = connectedPeerCount(runtimeWindow)
       setStep(4)
-      record(`Metrics captured: SW ${counts.swCache}, P2P ${counts.peerFetch}, server ${counts.serverFallback}; peers ${peerCount}.`)
+      record(`Attributed SDK reads: SW ${counts.swCache}, P2P ${counts.peerFetch}, server ${counts.serverFallback}; peers ${peerCount}.`)
 
-      const invalidate = await runtimeWindow.fetch('/api/invalidate/products/1', {
-        method: 'POST',
-        headers: { 'Idempotency-Key': crypto.randomUUID() },
-      })
-      if (invalidate.ok) {
-        const body = await invalidate.json() as { seq?: number; newSeq?: number }
-        const seq = body.seq ?? body.newSeq ?? 1
-        await fetch(`${signalBase}/gossip-seed`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${auth.token}`,
-          },
-          body: JSON.stringify({ roomId, key: '/api/products/1', seq, originNodeId: 'beta-next-runner' }),
-        }).catch(() => undefined)
-        record(`Gossip invalidation seeded for /api/products/1 seq=${seq}.`)
-      } else {
-        record(`Invalidation endpoint returned ${invalidate.status}; gossip seed skipped.`)
-      }
+      let invalidation: { outcome: string; version?: number } = { outcome: 'not_measured_admin_required' }
+      if (auth.role === 'admin') {
+        const response = await runtimeWindow.fetch('/api/invalidate/products/1', {
+          method: 'POST', headers: { Authorization: `Bearer ${auth.token}`, 'Idempotency-Key': crypto.randomUUID() },
+        })
+        if (!response.ok) throw new Error(`invalidation failed (${response.status})`)
+        const body = await response.json() as { seq?: number }
+        const reread = await runtimeWindow.fetch('/api/products/1', { cache: 'no-store' })
+        if (!reread.ok || !Number.isSafeInteger(body.seq) || Number(reread.headers.get('X-Nodex-Seq')) < Number(body.seq)) {
+          throw new Error('Authoritative read did not confirm the committed invalidation.')
+        }
+        invalidation = { outcome: 'authoritative_read_confirmed_gossip_unmeasured', version: body.seq }
+        record(`Committed invalidation confirmed by origin at version ${body.seq}; gossip delivery is not inferred.`)
+      } else record('Invalidation remains unmeasured: this tester cannot publish mutations.')
       setStep(5)
-      await sleep(1000)
 
       const telemetry = await collectProtocolTelemetry(runtimeWindow)
       const capture = readP2PCapture(runtimeWindow)
-      const finalCounts = countMetrics(metricEvents)
+      const finalCounts = countMetrics(autoMetrics())
+      const frameControl = (runtimeWindow as unknown as Record<string, (since: number) => { observations: ControlObservation[]; discarded: number }>)['__nodexControlMeter']?.(runStartedAt)
+      const pageControl = controlSnapshot(runStartedAt)
+      const workerControl = await workerControlSnapshot(runtimeWindow, runStartedAt)
+      const controlObservations = [...pageControl.observations, ...(frameControl?.observations ?? []), ...workerControl.observations]
+      const coverageComplete = !pageControl.discarded && frameControl?.discarded === 0 && !workerControl.discarded &&
+        workerControl.workerInstance === workerControlBefore.workerInstance
+      const economics = economicLedger(reads, controlObservations, runStartedAt, Date.now(), undefined, coverageComplete)
       lifecycle.record('protocol-complete')
       lifecycle.stop()
       const evidence = {
@@ -431,6 +465,7 @@ export function RunPage() {
         topologyLabel: topologyLabelForMode(mode),
         peerCount: connectedPeerCount(runtimeWindow),
         metrics: finalCounts,
+        reads, economics, invalidation,
         telemetry,
         telemetryCount: telemetry.length,
         p2pCapture: capture,
@@ -439,8 +474,9 @@ export function RunPage() {
         deviceHints: collectDeviceHints(),
       }
       writeRunEvidence({
+        roomId, reads, economics, invalidation, controlObservations,
         topologyLabel: evidence.topologyLabel,
-        resultHint: finalCounts.peerFetch > 0 || evidence.peerCount > 0 || mode === 'solo' ? 'pass' : 'partial',
+        resultHint: mode !== 'solo' && finalCounts.peerFetch > 0 && economics.matchedWorkload && autoMetrics().length === 6 ? 'pass' : 'partial',
         telemetry,
         storagePressure: { localLogEvents: readLogs().length, metricEvents: metricEvents.length },
         runtimeConfig: evidence.runtimeConfig,
@@ -451,6 +487,7 @@ export function RunPage() {
         p2pCapture: capture,
         recordedAt: new Date().toISOString(),
       })
+      record(`Economics: ${economics.avoidedOriginRequestsVsLocalCache ?? 'unmatched'} origin requests avoided versus local cache; monetary savings unmeasured.`)
       record(`Runtime evidence: ${evidence.peerCount} connected peer(s), ${evidence.telemetryCount} telemetry sample(s).`)
       await sendLog(auth.token, {
         participantId: session.participantId,
@@ -468,6 +505,7 @@ export function RunPage() {
           : 'No peer connected yet; this run only proves local SW/origin path.'
       setSummary(`${p2pText} SW ${finalCounts.swCache}, P2P ${finalCounts.peerFetch}, server ${finalCounts.serverFallback}.`)
     } catch (err) {
+      clearRunEvidence()
       setSummary(`Protocol test failed: ${(err as Error).message}`)
       record(`Protocol test failed: ${(err as Error).message}`)
     } finally {
@@ -495,7 +533,7 @@ export function RunPage() {
             {details.map((item) => <p key={item}>{item}</p>)}
           </div>
         ) : null}
-        {runtimeUrl ? <iframe ref={frameRef} className="protocol-frame" title="Nodex protocol runtime" src={runtimeUrl} /> : null}
+        {runtimeUrl ? <iframe ref={frameRef} className="protocol-frame" title="Nodex protocol runtime" referrerPolicy="no-referrer" src={runtimeUrl} /> : null}
       </section>
     </TesterLayout>
   )
@@ -504,7 +542,7 @@ export function RunPage() {
 export function EvidencePage() {
   const router = useRouter()
   const runEvidence = typeof window === 'undefined' ? null : readRunEvidence()
-  const [result, setResult] = useState<BetaResult>(runEvidence?.resultHint ?? 'pass')
+  const [result, setResult] = useState<BetaResult>(runEvidence?.resultHint ?? 'not_measured')
   const [topology, setTopology] = useState(runEvidence?.topologyLabel ?? 'same-machine-isolation')
   const [notes, setNotes] = useState('')
   const [status, setStatus] = useState('')
@@ -526,7 +564,7 @@ export function EvidencePage() {
         notes: notes.trim() || undefined,
         telemetry: runEvidence?.telemetry?.length ? runEvidence.telemetry : readLogs(),
         storagePressure: runEvidence?.storagePressure ?? { localLogEvents: readLogs().length },
-        runtimeConfig: { nextSuite: true, ...(isRecord(runEvidence?.runtimeConfig) ? runEvidence?.runtimeConfig : {}) },
+        runtimeConfig: { nextSuite: true, ...(isRecord(runEvidence?.runtimeConfig) ? runEvidence?.runtimeConfig : {}), economicLedger: runEvidence?.economics, invalidation: runEvidence?.invalidation },
         lifecycleSignals: runEvidence?.lifecycleSignals ?? [],
         deviceHints: runEvidence?.deviceHints ?? collectDeviceHints(),
       }
@@ -551,11 +589,11 @@ export function EvidencePage() {
   }
 
   function downloadLogs() {
-    const blob = new Blob([JSON.stringify(buildLogBundle(readAuth(), readSession()), null, 2)], { type: 'application/json' })
+    const blob = new Blob([JSON.stringify({ ...buildLogBundle(readAuth(), readSession()), runEvidence }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = 'nodex-beta-logs.json'
+    a.download = 'nodex-beta-evidence.json'
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -705,7 +743,7 @@ function buildRuntimeUrl(roomId: string, mode: string, signalingUrl: string, bet
   url.searchParams.set('nodexTopology', `beta-${mode}`)
   url.searchParams.set('nodexSignalingUrl', signalingUrl)
   url.searchParams.set('nodexApiOrigin', betaApiBase())
-  if (betaToken) url.searchParams.set('nodexBetaToken', betaToken)
+  if (betaToken) url.hash = new URLSearchParams({ nodexBetaToken: betaToken }).toString()
   return url.toString()
 }
 
@@ -882,4 +920,37 @@ function compactNodeLabel(label: string): string {
   const firstName = label.trim().split(/\s+/)[0] ?? label
   if (label.length > 14 && firstName.length <= 12) return firstName
   return label.length > 14 ? `${label.slice(0, 11)}...` : label
+}
+
+async function evictRuntimeKey(runtime: Window, key: string): Promise<void> {
+  const controller = (runtime as Window & { navigator: Navigator }).navigator.serviceWorker.controller
+  if (!controller) throw new Error('Controlled benchmark requires an active Service Worker.')
+  const channel = new MessageChannel()
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => { channel.port1.close(); channel.port2.close(); reject(new Error('Cache preparation timed out')) }, 2000)
+    channel.port1.onmessage = event => {
+      clearTimeout(timer)
+      channel.port1.close(); channel.port2.close()
+      if (event.data?.ok) resolve()
+      else reject(new Error('Cache preparation failed'))
+    }
+    controller.postMessage({ type: 'EVICT_PUBLIC_KEY', key }, [channel.port2])
+  })
+}
+
+async function workerControlSnapshot(runtime: Window, since: number): Promise<{
+  observations: ControlObservation[]; discarded: number; workerInstance: string;
+}> {
+  const controller = runtime.navigator.serviceWorker.controller
+  if (!controller) throw new Error('Service Worker control observations unavailable')
+  const channel = new MessageChannel()
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { channel.port1.close(); channel.port2.close(); reject(new Error('Control observation request timed out')) }, 2000)
+    channel.port1.onmessage = event => {
+      clearTimeout(timer); channel.port1.close(); channel.port2.close()
+      if (typeof event.data?.workerInstance !== 'string' || !Array.isArray(event.data.observations)) reject(new Error('Invalid control observation snapshot'))
+      else resolve(event.data)
+    }
+    controller.postMessage({ type: 'CONTROL_SNAPSHOT', since }, [channel.port2])
+  })
 }

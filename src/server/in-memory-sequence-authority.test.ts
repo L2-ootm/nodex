@@ -60,4 +60,30 @@ describe('InMemorySequenceAuthority conformance reference', () => {
     await authority.bump('/api/products/1', idempotencyKey)
     await expect(authority.bump('/api/products/2', idempotencyKey)).rejects.toBeInstanceOf(SequenceAuthorityInputError)
   })
+
+  it('commits one concurrent snapshot, rejects future bases and preserves payload on bumps', async () => {
+    const state = createInMemorySequenceState()
+    const authority = new InMemorySequenceAuthority(tenantA, state, () => 1000)
+    const key = '/api/products/1'
+    const results = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+      authority.write(key, uuid(400 + i), 0, { price: i })))
+    expect(results.filter(result => !('conflict' in result))).toHaveLength(1)
+    expect(state.outbox.size).toBe(1)
+    await expect(authority.write(key, uuid(500), 9, {})).resolves.toEqual({ conflict: true, currentVersion: 1 })
+    await authority.bump(key, uuid(501))
+    const read = await authority.read(key)
+    expect(read).toMatchObject({ seq: 2, payload: { price: 0 } })
+    read.payload!['price'] = 99
+    expect((await authority.read(key)).payload).toEqual({ price: 0 })
+  })
+
+  it('binds retry identity to command kind, base and payload', async () => {
+    const authority = new InMemorySequenceAuthority(tenantA)
+    const key = '/api/products/1', identity = uuid(600)
+    await authority.write(key, identity, 0, { a: 1, nested: { b: 2, c: 3 } })
+    await expect(authority.write(key, identity, 0, { nested: { c: 3, b: 2 }, a: 1 })).resolves.toMatchObject({ duplicate: true, seq: 1 })
+    await expect(authority.write(key, identity, 0, { a: 2 })).rejects.toBeInstanceOf(SequenceAuthorityInputError)
+    await expect(authority.write(key, identity, 1, { a: 1 })).rejects.toBeInstanceOf(SequenceAuthorityInputError)
+    await expect(authority.bump(key, identity)).rejects.toBeInstanceOf(SequenceAuthorityInputError)
+  })
 })

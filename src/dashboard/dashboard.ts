@@ -8,6 +8,7 @@
 //   T-03-04: event log capped at 50 rows (oldest removed from DOM)
 
 import type { MetricsEvent } from '../shared/types.js'
+import { MetricDeduplicator } from '../shared/metric-dedup.js'
 import { METRICS_CHANNEL_NAME, DEFAULT_API_ORIGIN } from '../shared/config.js'
 import { peerManager } from '../p2p/p2p-manager.js'
 
@@ -192,6 +193,7 @@ if (typeof document !== 'undefined') {
   // ---------------------------------------------------------------------------
 
   const channel = new BroadcastChannel(METRICS_CHANNEL_NAME)
+  const metricDedup = new MetricDeduplicator()
   channel.onmessage = (event: MessageEvent<unknown>) => {
     // Type guard: volatility-update events are not MetricsEvents — handle separately
     const data = event.data as Record<string, unknown>
@@ -410,6 +412,7 @@ if (typeof document !== 'undefined') {
   // ---------------------------------------------------------------------------
 
   function handleMetricsEvent(event: MetricsEvent): void {
+    if (!metricDedup.accept(event)) return
     // Accumulate all events for evidence export (capped at 500 to bound memory)
     if (collectedMetricsEvents.length < 500) {
       collectedMetricsEvents.push(event)

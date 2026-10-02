@@ -5,6 +5,7 @@ import {
   type InvalidationOutbox,
   type InvalidationSink,
 } from './invalidation-outbox.js'
+import { randomUUID } from 'node:crypto'
 
 export interface OutboxWorkerOptions {
   workerId: string
@@ -63,17 +64,20 @@ export async function runOutboxBatch(
     throw new TypeError('invalid outbox worker options')
   }
 
-  const events = await outbox.claim(options.workerId, batchSize, leaseMs)
+  // Each batch uses a fresh fencing identity. A delayed completion from an older
+  // batch cannot acknowledge a newly acquired lease from the same process.
+  const leaseOwner = randomUUID()
+  const events = await outbox.claim(leaseOwner, batchSize, leaseMs)
   const result: OutboxBatchResult = { claimed: events.length, delivered: 0, retried: 0, leaseLost: 0 }
 
   await runPool(events, concurrency, async (event: InvalidationEvent) => {
     try {
       await sink.deliver(event)
-      if (await outbox.acknowledge(event.eventId, options.workerId)) result.delivered++
+      if (await outbox.acknowledge(event.eventId, leaseOwner)) result.delivered++
       else result.leaseLost++
     } catch (error) {
       const delay = retryDelay(event.attempts, baseRetryMs, maxRetryMs)
-      if (await outbox.retry(event.eventId, options.workerId, delay, errorMessage(error))) result.retried++
+      if (await outbox.retry(event.eventId, leaseOwner, delay, errorMessage(error))) result.retried++
       else result.leaseLost++
     }
   })

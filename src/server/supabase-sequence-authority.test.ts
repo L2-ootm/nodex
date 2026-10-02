@@ -21,7 +21,7 @@ describe('SupabaseSequenceAuthority adapter', () => {
       seq: 7,
       updatedAt: Date.parse('2026-07-13T18:00:00.000Z'),
     })
-    expect(client.rpc).toHaveBeenCalledWith('nodex_read_sequence', {
+    expect(client.rpc).toHaveBeenCalledWith('nodex_read_snapshot', {
       p_tenant_id: tenantId,
       p_resource_key: '/api/products/1',
     })

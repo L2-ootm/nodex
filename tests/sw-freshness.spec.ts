@@ -49,7 +49,7 @@ test.describe('SW-05: freshness — seq-based staleness detection', () => {
     // productId format: "sw05-<timestamp>-<rand>" → path is "/api/products/sw05-..."
     const invalidatePath = `api/products/${productId}` // without leading slash for the route param
     const inv = await page.evaluate(async (p) => {
-      const r = await fetch(`http://localhost:3001/api/invalidate/${p}`, {
+      const r = await fetch(`http://localhost:33001/api/invalidate/${p}`, {
         method: 'POST',
         body: '',
       })
@@ -60,7 +60,7 @@ test.describe('SW-05: freshness — seq-based staleness detection', () => {
 
     // Step 4: Verify server seq via introspection endpoint
     const seqCheck = await page.evaluate(async (p) => {
-      const r = await fetch(`http://localhost:3001/api/__test__/seq/${p}`)
+      const r = await fetch(`http://localhost:33001/api/__test__/seq/${p}`)
       return r.json()
     }, invalidatePath)
     expect(seqCheck.seq).toBe(2)

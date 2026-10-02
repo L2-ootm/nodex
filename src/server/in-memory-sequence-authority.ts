@@ -1,6 +1,8 @@
 import {
   assertSequenceResourceKey,
   assertSequenceUuid,
+  cloneSnapshot,
+  canonicalSnapshot,
   MAX_SAFE_SEQUENCE,
   SequenceAuthorityInputError,
   SequenceAuthorityUnavailableError,
@@ -12,6 +14,7 @@ import {
 interface CommandRecord {
   resourceKey: string
   bump: SequenceBump
+  writeInput?: string
 }
 
 export interface InMemoryOutboxRecord extends SequenceBump {
@@ -52,7 +55,7 @@ export class InMemorySequenceAuthority implements SequenceAuthority {
     assertSequenceResourceKey(resourceKey)
     const record = this.state.heads.get(this.headKey(resourceKey))
     if (!record) throw new SequenceAuthorityUnavailableError()
-    return { ...record }
+    return structuredClone(record)
   }
 
   async bump(resourceKey: string, idempotencyKey: string): Promise<SequenceBump> {
@@ -61,7 +64,7 @@ export class InMemorySequenceAuthority implements SequenceAuthority {
     const commandKey = `${this.tenantId}:${idempotencyKey}`
     const existing = this.state.commands.get(commandKey)
     if (existing) {
-      if (existing.resourceKey !== resourceKey) throw new SequenceAuthorityInputError()
+      if (existing.resourceKey !== resourceKey || existing.writeInput !== undefined) throw new SequenceAuthorityInputError()
       return { ...existing.bump, duplicate: true }
     }
 
@@ -79,7 +82,7 @@ export class InMemorySequenceAuthority implements SequenceAuthority {
 
     // No await occurs inside this mutation block. A JavaScript process observes
     // head, command, and outbox as one deterministic transition.
-    this.state.heads.set(headKey, { seq: bump.seq, updatedAt })
+    this.state.heads.set(headKey, { ...previous, seq: bump.seq, updatedAt })
     this.state.commands.set(commandKey, { resourceKey, bump })
     this.state.outbox.set(commandKey, {
       ...bump,
@@ -93,5 +96,32 @@ export class InMemorySequenceAuthority implements SequenceAuthority {
 
   private headKey(resourceKey: string): string {
     return `${this.tenantId}:${resourceKey}`
+  }
+
+  async write(resourceKey: string, idempotencyKey: string, expectedVersion: number, input: Record<string, unknown>) {
+    assertSequenceResourceKey(resourceKey)
+    assertSequenceUuid(idempotencyKey)
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw new SequenceAuthorityInputError()
+    const payload = cloneSnapshot(input)
+    const writeInput = JSON.stringify([expectedVersion, canonicalSnapshot(payload)])
+    const commandKey = `${this.tenantId}:${idempotencyKey}`
+    const previousCommand = this.state.commands.get(commandKey)
+    if (previousCommand) {
+      if (previousCommand.resourceKey !== resourceKey || previousCommand.writeInput !== writeInput) throw new SequenceAuthorityInputError()
+      return { ...previousCommand.bump, duplicate: true }
+    }
+    const key = this.headKey(resourceKey)
+    const previous = this.state.heads.get(key)
+    const currentVersion = previous?.seq ?? 0
+    if (currentVersion !== expectedVersion) return { conflict: true as const, currentVersion }
+    const updatedAt = this.now()
+    if (currentVersion === MAX_SAFE_SEQUENCE || !Number.isSafeInteger(updatedAt) || updatedAt <= 0) throw new SequenceAuthorityUnavailableError()
+    const result: SequenceBump = { seq: currentVersion + 1, updatedAt, eventId: idempotencyKey, duplicate: false }
+    // Payload, command and outbox become visible together; no await in mutation.
+    this.state.heads.set(key, { seq: result.seq, updatedAt, payload })
+    this.state.commands.set(commandKey, { resourceKey, bump: result, writeInput })
+    this.state.outbox.set(commandKey, { ...result, tenantId: this.tenantId, resourceKey,
+      availableAt: updatedAt, attempts: 0 })
+    return { ...result }
   }
 }

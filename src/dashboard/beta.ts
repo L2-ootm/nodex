@@ -1005,7 +1005,7 @@ function getNodePositions(count: number, W: number, H: number): Array<{ x: numbe
   ]
 }
 
-function buildTopologySVG(nodes: TopologyNode[]): string {
+export function buildTopologySVG(nodes: TopologyNode[]): string {
   const W = 560
   const H = nodes.length <= 2 ? 170 : 220
   const positions = getNodePositions(nodes.length, W, H)
@@ -1029,7 +1029,7 @@ function buildTopologySVG(nodes: TopologyNode[]): string {
       <rect x="-4" y="10" width="8" height="5" class="mon-neck"/>
       <rect x="-13" y="15" width="26" height="4" rx="2" class="mon-base"/>
       <circle cx="18" cy="-18" r="4" class="status-dot ${stateClass}"/>
-      <text x="0" y="38" class="node-name">${label}</text>
+      <text x="0" y="38" class="node-name">${label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')}</text>
       <text x="0" y="52" class="node-role-label">${node.role}</text>
     </g>`
   })

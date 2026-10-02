@@ -1,10 +1,10 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { createBetaStore } from '../src/server/beta-coordinator.js'
+import { createConfiguredBetaStore } from '../src/server/beta-coordinator.js'
 
 const dataDir = process.env['NODEX_BETA_DATA_DIR'] ?? 'beta-data'
 const outDir = process.env['NODEX_BETA_EXPORT_DIR'] ?? 'test-results'
-const store = createBetaStore(dataDir)
+const store = createConfiguredBetaStore(dataDir)
 const ledger = await store.readLedger()
 
 await mkdir(outDir, { recursive: true })

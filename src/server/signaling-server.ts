@@ -2,7 +2,7 @@
 // Hono + @hono/node-ws signaling server for Phase 2 WebRTC peer discovery
 // Relays OFFER/ANSWER/ICE_CANDIDATE between peers; never relays data after handshake
 //
-// POC ONLY — production rewrite target: Go or Rust (see STATE.md stack constraints)
+// Loopback development transport. Hosted use goes through authenticated HTTP RPC.
 
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
@@ -13,9 +13,19 @@ import { createHash, timingSafeEqual } from 'node:crypto'
 import { DEFAULT_SIGNALING_ROOM, SIGNALING_PORT, PEER_FANOUT, LONG_RANGE_PEER_COUNT } from '../shared/config.js'
 import type { SignalingMessage } from '../shared/types.js'
 import { assertSequenceResourceKey, assertSequenceUuid } from './sequence-authority.js'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const app = new Hono()
 app.use('*', cors({ origin: '*' }))
+app.use('/ws', async (c, next) => {
+  if (process.env['NODE_ENV'] === 'production' || process.env['NODEX_BETA_ENFORCE_AUTH'] === 'true') {
+    return c.json({ error: 'use authenticated HTTP signaling' }, 503)
+  }
+  const origin = c.req.header('Origin')
+  if (origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return c.json({ error: 'origin not allowed' }, 403)
+  await next()
+})
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 
 // roomId → (nodeId → WSContext). The exported `peers` map is the default room
@@ -44,12 +54,14 @@ function pruneRoomIfEmpty(roomId: string, room: Map<string, WSContext>): void {
 }
 
 app.get('/ws', upgradeWebSocket((c) => {
-  const roomId = c.req.query('room')?.trim() || DEFAULT_SIGNALING_ROOM
+  const requestedRoom = c.req.query('room')?.trim() || DEFAULT_SIGNALING_ROOM
+  const roomId = /^[a-zA-Z0-9._-]{1,160}$/.test(requestedRoom) ? requestedRoom : DEFAULT_SIGNALING_ROOM
   const roomPeers = getPeers(roomId)
   let nodeId: string | null = null
 
   return {
     onMessage(event, ws) {
+      if (typeof event.data !== 'string' || event.data.length > 131_072) return
       let msg: SignalingMessage
       try {
         msg = JSON.parse(event.data as string) as SignalingMessage
@@ -57,11 +69,15 @@ app.get('/ws', upgradeWebSocket((c) => {
         return
       }
 
-      if (!msg.type) return
+      if (!msg || !msg.type) return
 
       switch (msg.type) {
         case 'JOIN': {
-          if (!msg.from) return
+          if (!msg.from || !/^[a-zA-Z0-9._-]{1,160}$/.test(msg.from) || msg.from === 'server') return
+          if ((nodeId && nodeId !== msg.from) || (roomPeers.has(msg.from) && roomPeers.get(msg.from) !== ws)) {
+            ws.close(1008, 'node identity already registered')
+            return
+          }
           nodeId = msg.from
           roomPeers.set(nodeId, ws)
           wsToNode.set(ws, { nodeId, roomId })
@@ -89,7 +105,7 @@ app.get('/ws', upgradeWebSocket((c) => {
         case 'OFFER':
         case 'ANSWER':
         case 'ICE_CANDIDATE': {
-          if (!msg.to || !msg.from) return
+          if (!nodeId || roomPeers.get(nodeId) !== ws || !msg.to || msg.from !== nodeId) return
           const target = roomPeers.get(msg.to)
           if (!target) return
           // Overwrite from with the registered nodeId (T-02-01 spoofing mitigation)
@@ -101,18 +117,13 @@ app.get('/ws', upgradeWebSocket((c) => {
         }
 
         case 'BROADCAST': {
-          // Server-initiated gossip invalidation forwarded to all peers in room
-          for (const [id, peer] of roomPeers) {
-            if (id !== nodeId && peer.readyState === WebSocket.OPEN) {
-              peer.send(JSON.stringify(msg))
-            }
-          }
+          // Reserved to server REST delivery; a peer cannot publish broadcasts.
           break
         }
 
         case 'LEAVE': {
           if (nodeId) {
-            roomPeers.delete(nodeId)
+            if (roomPeers.get(nodeId) === ws) roomPeers.delete(nodeId)
             pruneRoomIfEmpty(roomId, roomPeers)
             wsToNode.delete(ws)
             nodeId = null
@@ -130,7 +141,7 @@ app.get('/ws', upgradeWebSocket((c) => {
       const entry = wsToNode.get(ws)
       if (entry) {
         const room = getPeers(entry.roomId)
-        room.delete(entry.nodeId)
+        if (room.get(entry.nodeId) === ws) room.delete(entry.nodeId)
         pruneRoomIfEmpty(entry.roomId, room)
         wsToNode.delete(ws)
       }
@@ -162,8 +173,9 @@ app.post('/gossip-seed', async (c) => {
     return c.json({ error: 'tenant boundary unavailable' }, 503)
   }
 
-  let body: { tenantId?: string; key?: string; seq?: number; eventId?: string }
+  let body: { tenantId?: string; key?: string; seq?: number; eventId?: string; room?: string; proof?: string }
   try { body = await c.req.json() } catch { return c.json({ error: 'invalid json' }, 400) }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return c.json({ error: 'invalid publication' }, 400)
   try {
     if (body.tenantId !== undefined) assertSequenceUuid(body.tenantId)
     assertSequenceResourceKey(body.key ?? '')
@@ -178,26 +190,30 @@ app.post('/gossip-seed', async (c) => {
     return c.json({ error: 'invalid invalidation event' }, 400)
   }
 
-  const msg: SignalingMessage = {
-    type: 'BROADCAST',
-    from: 'server',
+  const msg = {
+    type: 'GOSSIP_INVALIDATE',
+    originNodeId: 'server', ttl: 5, t_invalidate: Date.now(),
+    msgId: body.eventId ?? crypto.randomUUID(),
     key: body.key,
     seq: body.seq,
     eventId: body.eventId,
+    ...(typeof body.proof === 'string' && body.proof.length <= 4096 ? { proof: body.proof } : {}),
   }
   const payload = JSON.stringify(msg)
   let notified = 0
-  for (const room of rooms.values()) {
-    for (const peer of room.values()) {
-      if (peer.readyState === WebSocket.OPEN) { peer.send(payload); notified++ }
+  const seededNodeIds: string[] = []
+  for (const [roomId, room] of rooms) {
+    if (body.room && body.room !== roomId) continue
+    for (const [id, peer] of room) {
+      if (peer.readyState === WebSocket.OPEN) { peer.send(payload); notified++; seededNodeIds.push(id) }
     }
   }
-  return c.json({ seeded: true, notified })
+  return c.json({ seeded: true, notified, seededNodeIds })
 })
 
-if (process.env['NODE_ENV'] !== 'test') {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const port = Number(process.env['PORT'] ?? SIGNALING_PORT)
-  const server = serve({ fetch: app.fetch, port }, (info) => {
+  const server = serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, (info) => {
     console.log(`[Nodex Signaling] Listening on ws://localhost:${info.port}/ws`)
   })
   injectWebSocket(server)

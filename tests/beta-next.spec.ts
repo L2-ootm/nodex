@@ -1,6 +1,37 @@
 import { expect, test } from '@playwright/test'
 
-test('tester completes routed Next beta flow and profile cache excludes note', async ({ page }) => {
+// UI fixtures only. Cryptography/transport/persistence are exercised separately
+// by beta-real.spec.ts, with no response interception.
+function mockRuntime(withPeer: boolean): string {
+  return `<!doctype html><html><body><script>
+    window.__peerManagerReady = true;
+    window.__peerConnections = new Map(${withPeer ? "[['peer-a', { state: 'connected' }]]" : '[]'});
+    window.__nodexPeerTelemetry = async () => ${withPeer ? "[{ connection_state: 'connected', peer_id: 'peer-a' }]" : "[{ connection_state: 'solo', selected_candidate_type: 'unknown' }]"};
+    window.__nodexRuntimeConfig = () => ({ signalingUrl: 'mock-http-signal', fixtureOnly: true });
+    const cached = new Set();
+    Object.defineProperty(navigator.serviceWorker, 'controller', { get: () => ({
+      postMessage: (message, ports) => { cached.delete(message.key); ports[0].postMessage(message.type === 'CONTROL_SNAPSHOT' ?
+        { observations: [], discarded: 0, workerInstance: 'mock-worker' } : { ok: true }); }
+    }) });
+    const ch = new BroadcastChannel('nodex-metrics');
+    window.__nodexControlMeter = () => ({ observations: [], discarded: 0 });
+    const originalFetch = window.fetch.bind(window);
+    window.fetch = async (path, init = {}) => {
+      if (!String(path).startsWith('/api/products/')) return originalFetch(path, init);
+      const mode = new Headers(init.headers).get('X-Nodex-Read-Mode');
+      const source = mode === 'origin' || init.cache === 'no-store' ? 'server-fallback' :
+        mode === 'auto' && ${withPeer} ? 'peer-fetch' : cached.has(path) ? 'sw-cache' : 'server-fallback';
+      cached.add(path);
+      const id = crypto.randomUUID();
+      setTimeout(() => ch.postMessage({ type: source, key: path, request_id: id, event_id: crypto.randomUUID() }), 0);
+      return new Response(JSON.stringify({ id: path, name: 'UI fixture' }), { headers: {
+        'X-Nodex-Seq': '1', 'X-Nodex-Request-Id': id, 'X-Nodex-Source': source
+      } });
+    };
+  </script></body></html>`
+}
+
+test('mocked UI: routed tester flow and profile cache excludes note', async ({ page }) => {
   await page.route('**/api/beta/auth', async (route) => {
     await route.fulfill({
       status: 200,
@@ -115,19 +146,7 @@ test('tester completes routed Next beta flow and profile cache excludes note', a
     await route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: `<!doctype html><html><body><script>
-        window.__peerManagerReady = true;
-        window.__peerConnections = new Map([['peer-a', { state: 'connected' }]]);
-        window.__nodexPeerTelemetry = async () => [{ connection_state: 'connected', peer_id: 'peer-a' }];
-        window.__nodexRuntimeConfig = () => ({ signalingUrl: 'mock-http-signal' });
-        window.__nodexLastP2PCapture = () => ({ key: '/api/products/1', seq: 1, ivB64: 'mock-iv', ctSample: 'mock-ciphertext' });
-        const ch = new BroadcastChannel('nodex-metrics');
-        setTimeout(() => {
-          ch.postMessage({ type: 'server-fallback', key: '/api/products/1' });
-          ch.postMessage({ type: 'peer-fetch', key: '/api/products/1' });
-          ch.postMessage({ type: 'gossip-propagation', key: '/api/products/1' });
-        }, 50);
-      </script></body></html>`,
+      body: mockRuntime(true),
     })
   })
 
@@ -203,7 +222,7 @@ test('tester completes routed Next beta flow and profile cache excludes note', a
   await expect(page.getByText('Evidence received.')).toBeVisible()
 })
 
-test('solo Next beta run auto-submits background-tab and mobile/browser lifecycle evidence', async ({ page }) => {
+test('mocked UI: solo run submits lifecycle evidence with a partial result', async ({ page }) => {
   await page.addInitScript(() => {
     localStorage.setItem('nodex-next-auth-v1', JSON.stringify({
       token: 'tester-token',
@@ -235,14 +254,7 @@ test('solo Next beta run auto-submits background-tab and mobile/browser lifecycl
     await route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: `<!doctype html><html><body><script>
-        window.__peerManagerReady = true;
-        window.__peerConnections = new Map();
-        window.__nodexPeerTelemetry = async () => [{ connection_state: 'solo', selected_candidate_type: 'unknown' }];
-        window.__nodexRuntimeConfig = () => ({ signalingUrl: 'mock-http-signal' });
-        const ch = new BroadcastChannel('nodex-metrics');
-        setTimeout(() => ch.postMessage({ type: 'server-fallback', key: '/api/products/1' }), 50);
-      </script></body></html>`,
+      body: mockRuntime(false),
     })
   })
   await page.route('**/api/products/*', async (route) => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { GET, POST } from './[...path].js'
 
 const token = 'nodex-tester-api'
+const grants = new Map<string, string>()
 
 function authHeaders(): HeadersInit {
   return {
@@ -11,13 +12,16 @@ function authHeaders(): HeadersInit {
 }
 
 async function postJson(path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const node = String(body.nodeId ?? (body.message as { from?: string } | undefined)?.from ?? '')
   const response = await POST(new Request(`http://localhost${path}`, {
     method: 'POST',
-    headers: authHeaders(),
+    headers: { ...authHeaders(), 'X-Nodex-Node-Grant': grants.get(node) ?? '' },
     body: JSON.stringify(body),
   }))
   expect(response.status).toBe(200)
-  return await response.json() as Record<string, unknown>
+  const result = await response.json() as Record<string, unknown>
+  if (typeof result.nodeGrant === 'string') grants.set(node, result.nodeGrant)
+  return result
 }
 
 async function poll(roomId: string, nodeId: string): Promise<Record<string, unknown>> {
@@ -26,7 +30,7 @@ async function poll(roomId: string, nodeId: string): Promise<Record<string, unkn
   url.searchParams.set('nodeId', nodeId)
   url.searchParams.set('after', '0')
   const response = await GET(new Request(url, {
-    headers: authHeaders(),
+    headers: { ...authHeaders(), 'X-Nodex-Node-Grant': grants.get(nodeId) ?? '' },
   }))
   expect(response.status).toBe(200)
   return await response.json() as Record<string, unknown>
@@ -34,6 +38,7 @@ async function poll(roomId: string, nodeId: string): Promise<Record<string, unkn
 
 describe('HTTP signaling route', () => {
   beforeEach(() => {
+    grants.clear()
     vi.stubEnv('NODEX_BETA_TOKENS', `${token}|API Tester||`)
     vi.stubEnv('NODEX_BETA_ADMIN_TOKENS', '')
     vi.stubEnv('SUPABASE_URL', '')

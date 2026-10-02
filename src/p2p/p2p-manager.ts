@@ -5,10 +5,12 @@
 import {
   DEFAULT_SIGNALING_ROOM,
   PEER_FANOUT,
+  MAX_PEER_CONNECTIONS,
   LONG_RANGE_PEER_COUNT,
   DC_GOSSIP_ID,
   DC_CACHE_FETCH_ID,
   METRICS_CHANNEL_NAME,
+  P2P_FETCH_TIMEOUT_MS,
   buildSignalingUrl,
   resolveNodexRuntimeConfig,
   type NodexRuntimeConfig,
@@ -26,6 +28,8 @@ import type {
   StoragePressureSample,
 } from '../shared/types.js'
 import { GossipEngine, _resetForTest as _resetGossipForTest } from '../gossip/gossip-engine.js'
+import { decodeProof, verifyProof, type PublisherIdentity } from '../crypto/publisher-proof.js'
+import { controlSnapshot, meteredFetch } from '../shared/control-meter.js'
 
 // Per-connection state model (includes Perfect Negotiation flags)
 interface PeerConnection {
@@ -69,6 +73,10 @@ let sessionStartInProgress = false
 let leadershipRole: 'leader' | 'follower' | 'unknown' = 'unknown'
 let leaderRenewTimer: number | null = null
 let followerRetryTimer: number | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectFailures = 0
+let swMessageHandlerRegistered = false
+let readerKey: { keyId: string; keyBytes: string } | null = null
 const telemetrySamples: PeerTelemetrySample[] = []
 const tabId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
   ? crypto.randomUUID()
@@ -77,6 +85,20 @@ const tabId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
 const LEADER_LOCK_KEY = 'nodex-p2p-leader-v1'
 const LEADER_LEASE_MS = 2000
 const LEADER_RENEW_MS = 500
+let publisherIdentity: PublisherIdentity | null = null
+
+async function verifyGossipForForward(msg: GossipMessage): Promise<boolean> {
+  const proof = msg.proof ? decodeProof(msg.proof) : null
+  if (!proof || proof.version !== msg.seq || proof.scope !== 'public') return false
+  if (publisherIdentity?.keyId !== proof.signingKeyId) {
+    const response = await fetch(new URL('/api/publisher-key', location.origin), {
+      cache: 'no-store', signal: AbortSignal.timeout(1000),
+    })
+    if (!response.ok) return false
+    publisherIdentity = await response.json() as PublisherIdentity
+  }
+  return proof.scope === 'public' && verifyProof(proof, publisherIdentity!, msg.key, 'invalidation')
+}
 
 // GossipEngine wired to connections Map with SW postMessage bridge (GOSP-02)
 const gossipEngine = new GossipEngine(
@@ -88,15 +110,17 @@ const gossipEngine = new GossipEngine(
       ch.close()
     }
   },
-  (msg: { key: string; seq: number }) => {
+  (msg: { key: string; seq: number; proof?: string }) => {
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.controller?.postMessage({
         type: 'GOSSIP_INVALIDATE',
         key: msg.key,
         seq: msg.seq,
+        proof: msg.proof,
       })
     }
-  }
+  },
+  verifyGossipForForward,
 )
 
 // ---------------------------------------------------------------------------
@@ -437,15 +461,16 @@ function getRuntimeConfigFromPage(): NodexRuntimeConfig {
     forceRelay: params.get('nodexForceRelay') ?? undefined,
     appOrigin: params.get('nodexAppOrigin') ?? undefined,
     apiOrigin: params.get('nodexApiOrigin') ?? undefined,
-    apiToken: params.get('nodexBetaToken') ?? undefined,
+    apiToken: new URLSearchParams(window.location.hash?.slice(1)).get('nodexBetaToken') ?? params.get('nodexBetaToken') ?? undefined,
   })
 }
 
 async function fetchTurnCredentials(apiOrigin: string, token: string): Promise<void> {
   if (!token) return
   try {
-    const res = await fetch(`${apiOrigin}/api/turn-credentials`, {
+    const res = await meteredFetch('turn-credentials', `${apiOrigin}/api/turn-credentials`, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
     })
     if (!res.ok) {
       console.warn('[p2p] TURN credentials fetch failed:', res.status)
@@ -479,8 +504,9 @@ async function waitForSwController(timeoutMs = 8000): Promise<ServiceWorker | nu
 async function importSessionKeyFromServer(apiOrigin: string, token: string): Promise<void> {
   if (!token) return
   try {
-    const res = await fetch(`${apiOrigin}/api/session-key`, {
+    const res = await meteredFetch('session-key', `${apiOrigin}/api/session-key`, {
       headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
     })
     if (!res.ok) {
       console.warn('[p2p] session key fetch failed:', res.status)
@@ -488,6 +514,7 @@ async function importSessionKeyFromServer(apiOrigin: string, token: string): Pro
     }
     const body = await res.json() as { keyId?: string; keyBytes?: string }
     if (body.keyBytes && body.keyId) {
+      readerKey = { keyId: body.keyId, keyBytes: body.keyBytes }
       // Wait for the SW to claim this page before sending IMPORT_SESSION_KEY.
       // init() may run before SW activation completes; a null controller drops the message.
       const controller = await waitForSwController()
@@ -517,18 +544,20 @@ function getHttpSignalingBase(): string | null {
   return configured.replace(/\/$/, '')
 }
 
+let httpNodeGrant = ''
 function signalAuthHeaders(token: string): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (token) headers['Authorization'] = `Bearer ${token}`
+  if (httpNodeGrant) headers['X-Nodex-Node-Grant'] = httpNodeGrant
   return headers
 }
 
 async function postHttpSignal(baseUrl: string, path: string, body: unknown, signal?: AbortSignal, token = ''): Promise<Response> {
-  return fetch(`${baseUrl}${path}`, {
+  return meteredFetch('signal' + path, `${baseUrl}${path}`, {
     method: 'POST',
     headers: signalAuthHeaders(token),
     body: JSON.stringify(body),
-    signal,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(5000)]) : AbortSignal.timeout(5000),
   })
 }
 
@@ -538,9 +567,15 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
   const signal = signalingAbortController.signal
   const token = (runtimeConfig ?? resolveNodexRuntimeConfig()).apiToken
 
+  const grantStorageKey = `nodex-node-grant:${currentRoomId}:${currentNodeId}`
+  try { httpNodeGrant = localStorage.getItem(grantStorageKey) ?? '' } catch { httpNodeGrant = '' }
+
   const joinRes = await postHttpSignal(baseUrl, '/join', { roomId: currentRoomId, nodeId: currentNodeId }, signal, token)
   if (!joinRes.ok) throw new Error(`[p2p] HTTP signaling join failed: ${joinRes.status}`)
-  const join = await joinRes.json() as { peers?: string[]; polite?: boolean; after?: number }
+  const join = await joinRes.json() as { peers?: string[]; polite?: boolean; after?: number; nodeGrant?: string }
+  if (!join.nodeGrant) throw new Error('HTTP signaling did not issue a node grant')
+  httpNodeGrant = join.nodeGrant
+  try { localStorage.setItem(grantStorageKey, httpNodeGrant) } catch { /* Session remains functional without durable storage. */ }
 
   signalingTransport = {
     send(payload: string) {
@@ -571,46 +606,59 @@ async function startHttpSignaling(baseUrl: string, currentRoomId: string, curren
     polite: Boolean(join.polite),
   })
 
-  let after = Number.isFinite(join.after) ? Number(join.after) : 0
-  signalingPollTimer = window.setInterval(() => {
+  let after = Number.isSafeInteger(join.after) ? Number(join.after) : 0
+  let failures = 0
+  const discoveryStarted = Date.now()
+  async function poll(): Promise<void> {
     if (!signalingTransport || signal.aborted) return
-    const url = new URL(`${baseUrl}/poll`)
-    url.searchParams.set('roomId', currentRoomId)
-    url.searchParams.set('nodeId', currentNodeId)
-    url.searchParams.set('after', String(after))
-    const pollHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {}
-    fetch(url, { signal, headers: pollHeaders })
-      .then((res) => res.ok ? res.json() : null)
-      .then(async (body: {
-        messages?: Array<{ id: number; message: SignalingMessage | GossipMessage }>
-        peers?: string[]
-        polite?: boolean
-      } | null) => {
-        if (body?.peers?.length) {
-          await handleSignalingMessage({
-            type: 'PEERS_LIST',
-            from: 'server',
-            peers: body.peers,
-            polite: Boolean(body.polite),
-          })
-        }
-        // Process messages sequentially so ICE candidates are applied after setRemoteDescription.
-        // Concurrent dispatch (void promises) allowed ICE to race ahead of OFFER/ANSWER SDP.
-        for (const envelope of body?.messages ?? []) {
-          if (Number.isFinite(envelope.id)) after = Math.max(after, envelope.id)
-          await handleSignalingMessage(envelope.message).catch((err) => {
-            console.warn('[p2p] HTTP signaling message error:', err)
-          })
-        }
-      })
-      .catch((err) => {
-        if (!signal.aborted) console.warn('[p2p] HTTP signaling poll failed:', err)
-      })
-  }, 500)
+    try {
+      const url = new URL(`${baseUrl}/poll`)
+      url.searchParams.set('roomId', currentRoomId)
+      url.searchParams.set('nodeId', currentNodeId)
+      url.searchParams.set('after', String(after))
+      const response = await meteredFetch('signal/poll', url, {
+        signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]), headers: signalAuthHeaders(token) })
+      if (!response.ok) throw new Error(`signaling poll: ${response.status}`)
+      const body = await response.json() as {
+        messages?: Array<{ id: number; message: SignalingMessage | GossipMessage }>;
+        peers?: string[]; polite?: boolean; after?: number;
+      }
+      failures = 0
+      if (body.peers?.length) await handleSignalingMessage({ type: 'PEERS_LIST', from: 'server',
+        peers: body.peers, polite: Boolean(body.polite) })
+      for (const envelope of body.messages ?? []) {
+        await handleSignalingMessage(envelope.message)
+        if (Number.isSafeInteger(envelope.id)) after = Math.max(after, envelope.id)
+      }
+      // Cursor includes messages for other recipients; don't poll them repeatedly.
+      if (Number.isSafeInteger(body.after)) after = Math.max(after, Number(body.after))
+    } catch (error) {
+      failures++
+      if (!signal.aborted) console.warn('[p2p] HTTP signaling poll failed:', error)
+      if (failures >= 3 && !signal.aborted) {
+        signalingTransport?.close()
+        scheduleSessionRetry()
+      }
+    } finally {
+      if (!signal.aborted && signalingTransport) {
+        const connected = [...connections.values()].some(c => c.state === 'connected')
+        const interval = failures ? Math.min(30_000, 1_000 * 2 ** Math.min(failures, 5))
+          : connected || Date.now() - discoveryStarted > 20_000 ? 15_000 : 1_000
+        signalingPollTimer = window.setTimeout(() => { void poll() }, interval)
+      }
+    }
+  }
+  // One in-flight poll, with lower idle/connected traffic and bounded backoff.
+  signalingPollTimer = window.setTimeout(() => { void poll() }, 0)
+
 }
 
+export function isPolitePeer(localId: string, remoteId: string): boolean {
+  return localId > remoteId
+}
 function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'): void {
-  if (connections.has(peerId)) return
+  if (!/^[a-zA-Z0-9._-]{1,160}$/.test(peerId) || peerId === nodeId || peerId === 'server' ||
+    connections.has(peerId) || connections.size >= MAX_PEER_CONNECTIONS) return
 
   const token = (runtimeConfig ?? resolveNodexRuntimeConfig()).apiToken
   const apiOrigin = (runtimeConfig ?? resolveNodexRuntimeConfig()).apiOrigin
@@ -630,7 +678,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
     pc,
     gossip,
     cacheFetch,
-    polite,
+    polite: nodeId ? isPolitePeer(nodeId, peerId) : polite,
     role,
     state: 'connecting',
     makingOffer: false,
@@ -673,7 +721,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
       await pc.setLocalDescription()
       signalingTransport?.send(
         JSON.stringify({
-          type: 'OFFER',
+          type: pc.localDescription?.type === 'answer' ? 'ANSWER' : 'OFFER',
           sdp: pc.localDescription,
           from: nodeId,
           to: peerId,
@@ -701,6 +749,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
   }
 
   // Connection state machine + ICE restart on failure (PEER-04)
+  let iceRestarts = 0
   pc.addEventListener('connectionstatechange', () => {
     const state = pc.connectionState
     if (state === 'connected') {
@@ -716,7 +765,8 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
           pendingRequests.delete(reqId)
         }
       }
-      pc.restartIce()
+      if (++iceRestarts <= 2) pc.restartIce()
+      else { conn.state = 'closed'; connections.delete(peerId); pc.close() }
     } else if (state === 'closed') {
       conn.state = 'closed'
       connections.delete(peerId)
@@ -730,6 +780,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
 
   // Dispatch cache-fetch DataChannel messages — handles both response and inbound request paths
   cacheFetch.onmessage = (event: MessageEvent) => {
+    if (typeof event.data !== 'string' || event.data.length > 2_097_152) return
     let data: PeerFetchResponse | PeerFetchRequest
     try {
       data = JSON.parse(event.data as string) as typeof data
@@ -753,7 +804,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
         } catch { /* non-JSON payload — skip capture */ }
       }
       const entry = pendingRequests.get(resp.reqId)
-      if (entry) {
+      if (entry && entry.peerId === peerId) {
         entry.resolver(resp)
         pendingRequests.delete(resp.reqId)
       }
@@ -815,15 +866,28 @@ function sendCacheFetchRequest(
 ): void {
   const reqId = crypto.randomUUID()
 
+  if (pendingRequests.size >= 128 || conn.cacheFetch.readyState !== 'open' || conn.cacheFetch.bufferedAmount > 262_144) {
+    replyPort.postMessage({ type: 'P2P_FETCH_RESPONSE', found: false })
+    replyPort.close()
+    return
+  }
+  const timer = setTimeout(() => {
+    pendingRequests.delete(reqId)
+    try { replyPort.postMessage({ type: 'P2P_FETCH_RESPONSE', found: false }) } catch { /* Closed SW request. */ }
+    replyPort.close()
+  }, P2P_FETCH_TIMEOUT_MS)
+
   pendingRequests.set(reqId, {
     peerId: conn.peerId,
     resolver: (response: PeerFetchResponse) => {
+      clearTimeout(timer)
       replyPort.postMessage({
         type: 'P2P_FETCH_RESPONSE',
         found: response.found,
         payload: response.payload,
         seq: response.seq,
       })
+      replyPort.close()
     },
   })
 
@@ -833,7 +897,9 @@ function sendCacheFetchRequest(
   } catch (err) {
     console.warn('[p2p] sendCacheFetchRequest send error:', err)
     pendingRequests.delete(reqId)
+    clearTimeout(timer)
     replyPort.postMessage({ type: 'P2P_FETCH_RESPONSE', found: false })
+    replyPort.close()
   }
 }
 
@@ -842,6 +908,21 @@ function sendCacheFetchRequest(
 // ---------------------------------------------------------------------------
 
 function handleSwMessage(event: MessageEvent): void {
+  if (event.data?.type === 'GET_SESSION_KEY') {
+    const port = event.ports[0]
+    const keyId = event.data.keyId
+    if (!port || typeof keyId !== 'string' || !/^[a-zA-Z0-9._-]{1,160}$/.test(keyId)) return
+    void (async () => {
+      if (readerKey?.keyId !== keyId && runtimeConfig?.apiToken) {
+        await importSessionKeyFromServer(runtimeConfig.apiOrigin, runtimeConfig.apiToken)
+      }
+      try { port.postMessage({ type: 'SESSION_KEY_RESPONSE',
+        ...(readerKey?.keyId === keyId ? readerKey : {}) }) }
+      catch { /* The requesting worker deadline may have expired. */ }
+      finally { port.close() }
+    })()
+    return
+  }
   if (event.data?.type !== 'P2P_FETCH') return
 
   const key = event.data.key as string
@@ -864,7 +945,7 @@ function handleSwMessage(event: MessageEvent): void {
 async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Promise<void> {
   // Server-seeded invalidations arrive via signaling WebSocket
   if (msg.type === 'GOSSIP_INVALIDATE') {
-    gossipEngine.onmessage(msg as GossipMessage, 'server')
+    await gossipEngine.onmessage(msg as GossipMessage, 'server')
     return
   }
   if (msg.type === 'BROADCAST') {
@@ -877,6 +958,10 @@ async function handleSignalingMessage(msg: SignalingMessage | GossipMessage): Pr
 
   const sigMsg = msg as SignalingMessage
   if (sigMsg.type === 'JOIN_ACK' || sigMsg.type === 'PEERS_LIST') {
+    if (sigMsg.type === 'JOIN_ACK') {
+      reconnectFailures = 0
+      markPeerManagerReady()
+    }
     const peers = sigMsg.peers ?? []
     // peers[0..PEER_FANOUT-1] = local; peers[PEER_FANOUT..PEER_FANOUT+LONG_RANGE_PEER_COUNT-1] = long-range
     for (let i = 0; i < peers.length; i++) {
@@ -1053,7 +1138,18 @@ function markPeerManagerReady(): void {
   })
   ;(window as unknown as Record<string, unknown>)['__nodexLastP2PCapture'] = () => lastP2PCapture
   ;(window as unknown as Record<string, unknown>)['__nodexCaptureEvidence'] = captureEvidence
+  ;(window as unknown as Record<string, unknown>)['__nodexControlMeter'] = controlSnapshot
   exposeLeadershipState()
+}
+
+function scheduleSessionRetry(): void {
+  if (leadershipRole !== 'leader' || reconnectTimer !== null) return
+  if (typeof window !== 'undefined') (window as unknown as Record<string, unknown>)['__peerManagerReady'] = false
+  const delay = Math.min(30_000, 1000 * 2 ** Math.min(reconnectFailures++, 5))
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    void startP2PSession()
+  }, delay)
 }
 
 function startFollowerRetryLoop(): void {
@@ -1073,13 +1169,14 @@ async function startP2PSession(): Promise<void> {
   sessionStartInProgress = true
   roomId = getRoomId()
   topologyLabel = getTopologyLabel()
-  runtimeConfig = getRuntimeConfigFromPage()
+  runtimeConfig ??= getRuntimeConfigFromPage()
 
   try {
     nodeId = await getNodeIdFromSW()
   } catch (err) {
     console.warn('[p2p] failed to get nodeId from SW:', err)
     sessionStartInProgress = false
+    scheduleSessionRetry()
     return
   }
 
@@ -1090,21 +1187,24 @@ async function startP2PSession(): Promise<void> {
     } catch (err) {
       console.warn('[p2p] HTTP signaling error:', err)
       signalingTransport = null
+      scheduleSessionRetry()
     }
   } else {
     const ws = new WebSocket(getSignalingUrl(roomId))
-    signalingTransport = {
+    const joinDeadline = setTimeout(() => { ws.close() }, 10_000)
+    const transport = {
       send(payload: string) {
         if (ws.readyState === WebSocket.OPEN) ws.send(payload)
       },
       close() {
+        clearTimeout(joinDeadline)
         ws.close()
       },
     }
+    signalingTransport = transport
 
     ws.addEventListener('open', () => {
       ws.send(JSON.stringify({ type: 'JOIN', from: nodeId }))
-      markPeerManagerReady()
     })
 
     ws.addEventListener('message', (event) => {
@@ -1114,27 +1214,35 @@ async function startP2PSession(): Promise<void> {
       } catch {
         return
       }
+      if (msg.type === 'JOIN_ACK') clearTimeout(joinDeadline)
       handleSignalingMessage(msg).catch((err) => {
         console.warn('[p2p] handleSignalingMessage error:', err)
       })
     })
 
     ws.addEventListener('close', () => {
+      clearTimeout(joinDeadline)
+      if (signalingTransport !== transport) return
       signalingTransport = null
+      scheduleSessionRetry()
     })
 
     ws.addEventListener('error', (err) => {
+      clearTimeout(joinDeadline)
+      if (signalingTransport !== transport) return
       console.warn('[p2p] WebSocket error:', err)
       signalingTransport = null
+      ws.close()
+      scheduleSessionRetry()
     })
   }
 
   // Register SW message handler for P2P_FETCH requests
-  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  if (!swMessageHandlerRegistered && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
     navigator.serviceWorker.addEventListener('message', handleSwMessage)
+    swMessageHandlerRegistered = true
   }
 
-  markPeerManagerReady()
   sessionStartInProgress = false
 }
 
@@ -1143,7 +1251,7 @@ async function init(): Promise<void> {
   initConsoleErrorCapture()
   roomId = getRoomId()
   topologyLabel = getTopologyLabel()
-  runtimeConfig = getRuntimeConfigFromPage()
+  runtimeConfig ??= getRuntimeConfigFromPage()
 
   const token = runtimeConfig.apiToken
   const apiOrigin = runtimeConfig.apiOrigin
@@ -1173,6 +1281,12 @@ async function init(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export function _resetForTest(): void {
+  if (reconnectTimer !== null) clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  reconnectFailures = 0
+  swMessageHandlerRegistered = false
+  readerKey = null
+  publisherIdentity = null
   connections.clear()
   pendingRequests.clear()
   signalingTransport = null

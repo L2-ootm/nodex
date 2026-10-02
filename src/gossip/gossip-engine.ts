@@ -5,6 +5,7 @@
 
 import { GOSSIP_SEEN_SET_MAX, GOSSIP_TTL, PEER_FANOUT } from '../shared/config.js'
 import type { GossipMessage, MetricsEvent } from '../shared/types.js'
+import { decodeProof } from '../crypto/publisher-proof.js'
 
 // ---------------------------------------------------------------------------
 // LruSet — bounded LRU deduplication set (T-03-01, GOSP-03)
@@ -63,14 +64,14 @@ interface GossipPeerEntry {
 export class GossipEngine {
   private connections: Map<string, GossipPeerEntry>
   private emitMetric: (event: Partial<MetricsEvent> & { type: string }) => void
-  private swNotify: ((msg: { key: string; seq: number }) => void) | undefined
+  private swNotify: ((msg: { key: string; seq: number; proof?: string }) => void) | undefined
   private seen = new LruSet(GOSSIP_SEEN_SET_MAX)
-  private seqMap = new Map<string, number>()
 
   constructor(
     connections: Map<string, GossipPeerEntry>,
     emitMetric: (event: Partial<MetricsEvent> & { type: string }) => void,
-    swNotify?: (msg: { key: string; seq: number }) => void,
+    swNotify?: (msg: { key: string; seq: number; proof?: string }) => void,
+    private verifyForForward?: (msg: GossipMessage) => Promise<boolean>,
   ) {
     this.connections = connections
     this.emitMetric = emitMetric
@@ -89,7 +90,7 @@ export class GossipEngine {
       } catch {
         return
       }
-      this.onmessage(msg, peerId)
+      void this.onmessage(msg, peerId).catch(() => undefined)
     }
   }
 
@@ -97,15 +98,16 @@ export class GossipEngine {
   // onmessage — core deduplication + seq guard + metric emit + forward
   // -------------------------------------------------------------------------
 
-  onmessage(msg: GossipMessage, fromPeerId: string): void {
+  async onmessage(msg: GossipMessage, fromPeerId: string): Promise<void> {
     // Validate required fields
     if (
-      !msg.msgId ||
+      !msg || typeof msg.msgId !== 'string' || msg.msgId.length > 160 || !msg.msgId ||
+      typeof msg.key !== 'string' || !/^\/api\/products\/[a-zA-Z0-9_-]+$/.test(msg.key) || msg.key.length > 256 ||
       typeof msg.seq !== 'number' ||
       msg.seq <= 0 ||
-      !Number.isInteger(msg.seq) ||
+      !Number.isSafeInteger(msg.seq) ||
       typeof msg.ttl !== 'number' ||
-      msg.ttl < 0 ||
+      msg.ttl < 0 || msg.ttl > GOSSIP_TTL ||
       !Number.isInteger(msg.ttl)
     ) {
       return
@@ -117,32 +119,30 @@ export class GossipEngine {
     }
     this.seen.add(msg.msgId)
 
-    // GOSP-04: seq monotonicity guard — drop stale or replayed invalidations
-    if (this.seqMap.has(msg.key) && msg.seq <= this.seqMap.get(msg.key)!) {
-      return
-    }
-    this.seqMap.set(msg.key, msg.seq)
+    // Only the SW may promote a verified version. Untrusted gossip must never
+    // establish a local high-water mark that suppresses later valid messages.
+    this.swNotify?.({ key: msg.key, seq: msg.seq, ...(msg.proof ? { proof: msg.proof } : {}) })
 
-    // Notify SW of the invalidation BEFORE forwarding
-    this.swNotify?.({ key: msg.key, seq: msg.seq })
-
-    // Emit gossip-propagation metric
+    const verified = Boolean(msg.proof && await this.verifyForForward?.(msg).catch(() => false))
+    const publishedAt = verified ? decodeProof(msg.proof ?? null)?.validatedAt ?? msg.t_invalidate : msg.t_invalidate
+    // Unsigned observations are diagnostics, not proof of invalidation delivery.
     const now = Date.now()
     this.emitMetric({
       schema_version: 1,
       type: 'gossip-propagation',
       key: msg.key,
       msgId: msg.msgId,
-      t_invalidate: msg.t_invalidate,
+      t_invalidate: publishedAt,
+      publisher_verified: verified,
       t_received: now,
       hop_count: GOSSIP_TTL - msg.ttl,
-      latency_ms: now - msg.t_invalidate,
+      latency_ms: Math.max(0, now - publishedAt),
       source_node_id: msg.originNodeId,
       timestamp: now,
     })
 
     // Forward if TTL allows further hops (T-03-02)
-    if (msg.ttl > 0) {
+    if (msg.ttl > 0 && verified) {
       this.forward(msg, fromPeerId)
     }
   }

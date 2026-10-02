@@ -24,10 +24,10 @@ test.describe('SW-02: cache hit', () => {
     // Give the SW time to fully write the cache entry before the second fetch
     await page.waitForTimeout(300)
 
-    // Track whether a NEW request fires to port 3001 during the second fetch
+    // Track whether a NEW request fires to port 33001 during the second fetch
     let networkHitDuringSecondFetch = false
     page.on('request', (req) => {
-      if (req.url().includes(':3001/api/products/1')) {
+      if (req.url().includes(':33001/api/products/1')) {
         networkHitDuringSecondFetch = true
       }
     })

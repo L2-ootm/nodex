@@ -20,9 +20,9 @@ export default defineConfig({
     outDir: '../../dist',
     rollupOptions: {
       input: {
-        main: path.resolve(__dirname, 'src/dashboard/index.html'),
-        metrics: path.resolve(__dirname, 'src/dashboard/metrics.html'),
-        beta: path.resolve(__dirname, 'src/dashboard/beta.html'),
+        main: path.resolve(import.meta.dirname, 'src/dashboard/index.html'),
+        metrics: path.resolve(import.meta.dirname, 'src/dashboard/metrics.html'),
+        beta: path.resolve(import.meta.dirname, 'src/dashboard/beta.html'),
       },
     },
   },
@@ -32,7 +32,7 @@ export default defineConfig({
     // to the real mock API (not the static file server).
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: `http://localhost:${process.env['NODEX_API_PORT'] ?? 3001}`,
         changeOrigin: true,
       },
     },
@@ -41,7 +41,7 @@ export default defineConfig({
     // Also proxy /api/* in preview mode (used by Playwright integration tests).
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: `http://localhost:${process.env['NODEX_API_PORT'] ?? 3001}`,
         changeOrigin: true,
       },
     },
@@ -49,7 +49,7 @@ export default defineConfig({
   plugins: [
     VitePWA({
       strategies: 'injectManifest',
-      srcDir: path.resolve(__dirname, 'src/sw'),
+      srcDir: path.resolve(import.meta.dirname, 'src/sw'),
       filename: 'sw.ts',
       injectManifest: {
         // Do not inject Workbox precache manifest — Nodex manages its own cache

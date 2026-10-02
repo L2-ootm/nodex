@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { buildBetaSessionPayload, buildLogBundle, collectBetaEvidencePayload } from './beta.js'
+import { buildBetaSessionPayload, buildLogBundle, collectBetaEvidencePayload, buildTopologySVG } from './beta.js'
 
 describe('beta dashboard payload helpers', () => {
+  it('untrusted participant names remain SVG text and cannot create executable elements', () => {
+    const name = '</text><script>globalThis.compromised=true</script><image onload="alert(1)"/> & Ana'
+    const svg = buildTopologySVG([{ id: 'tester', name, role: 'tester', online: true, isMe: false }])
+    expect(svg).not.toContain('<script>')
+    expect(svg).not.toContain('<image')
+    expect(svg).toContain('&lt;/text&gt;')
+    expect(svg).toContain('&amp; Ana')
+  })
   it('builds a session payload with explicit credit consent and trimmed fields', () => {
     const payload = buildBetaSessionPayload({
       name: '  Maria Tester  ',

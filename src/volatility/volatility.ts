@@ -36,11 +36,12 @@ import type { VolatilityEntry } from '../shared/types.js'
  * @param now   - Current epoch ms; defaults to Date.now(). Inject for deterministic tests.
  */
 export function computeScore(entry: VolatilityEntry, now: number = Date.now()): number {
-  const change_frequency = Math.min(entry.change_count / VOL_CHANGE_BASELINE, 1)
+  const expired = entry.window_started_at !== undefined && now - entry.window_started_at >= VOL_DECAY_WINDOW_MS
+  const change_frequency = Math.min((expired ? 0 : entry.change_count) / VOL_CHANGE_BASELINE, 1)
   // Clamp both ends: prevents > 1 when last_changed_at is in the future (clock skew) (WR-03)
   const recency_raw = (now - entry.last_changed_at) / VOL_DECAY_WINDOW_MS
   const recency_decay = 1 - Math.min(Math.max(recency_raw, 0), 1)
-  const access_frequency = Math.min(entry.access_count / VOL_ACCESS_BASELINE, 1)
+  const access_frequency = Math.min((expired ? 0 : entry.access_count) / VOL_ACCESS_BASELINE, 1)
 
   const raw =
     VOL_ALPHA * change_frequency +
@@ -48,6 +49,18 @@ export function computeScore(entry: VolatilityEntry, now: number = Date.now()): 
     VOL_GAMMA * (1 - access_frequency)
 
   return Math.max(0, Math.min(1, raw))
+}
+
+export function recordActivity(key: string, previous: VolatilityEntry | undefined,
+  activity: 'read' | 'change', now = Date.now()): VolatilityEntry {
+  const expired = !previous?.window_started_at || now - previous.window_started_at >= VOL_DECAY_WINDOW_MS
+  const entry: VolatilityEntry = { key, window_started_at: expired ? now : previous.window_started_at,
+    change_count: expired ? 0 : previous.change_count,
+    access_count: expired ? 0 : previous.access_count,
+    last_changed_at: previous?.last_changed_at ?? 0 }
+  if (activity === 'change') { entry.change_count++; entry.last_changed_at = now }
+  else entry.access_count++
+  return entry
 }
 
 /**

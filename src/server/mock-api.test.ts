@@ -55,6 +55,10 @@ describe('mock-api', () => {
   })
 
   it('keeps test faults disabled in production even if the flag is set', async () => {
+    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+    vi.stubEnv('NODEX_PUBLISHER_PRIVATE_JWK', JSON.stringify(await crypto.subtle.exportKey('jwk', pair.privateKey)))
+    vi.stubEnv('NODEX_PUBLISHER_EPOCH', 'test-production')
+    vi.stubEnv('NODEX_TENANT_ID', '10000000-0000-4000-8000-000000000001')
     vi.stubEnv('NODE_ENV', 'production')
     vi.stubEnv('NODEX_ENABLE_TEST_FAULTS', 'true')
     const res = await app.request('/api/products/1?__nodex_test_seq=99')
@@ -97,7 +101,7 @@ describe('mock-api', () => {
     const keyId = res.headers.get('X-Nodex-Key-Id')
     expect(iv).not.toBeNull()
     expect(iv!.length).toBeGreaterThan(0)
-    expect(keyId).toBe('default')
+    expect(keyId).toMatch(/^aes-[0-9a-f]{24}$/)
   })
 
   it('Test 9: GET /api/products/1 X-Nodex-Iv decodes to 12 bytes (96-bit AES-GCM IV)', async () => {
@@ -111,7 +115,7 @@ describe('mock-api', () => {
     const res = await app.request('/api/session-key')
     expect(res.status).toBe(200)
     const body = await res.json() as { keyId: string; keyBytes: string }
-    expect(body.keyId).toBe('default')
+    expect(body.keyId).toMatch(/^aes-[0-9a-f]{24}$/)
     expect(body.keyBytes).toMatch(/^[A-Za-z0-9+/]+=*$/)
     // 32 bytes = 44 base64 chars (with padding)
     expect(body.keyBytes.length).toBe(44)
@@ -171,7 +175,7 @@ describe('mock-api', () => {
     const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
 
     const plaintext = await globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, 'default', validatedAt) },
+      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, prodRes.headers.get('X-Nodex-Key-Id')!, validatedAt) },
       cryptoKey,
       Buffer.from(ct, 'base64')
     )
@@ -199,7 +203,7 @@ describe('mock-api', () => {
 
     await expect(
       globalThis.crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, 'default', validatedAt) },
+        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, prodRes.headers.get('X-Nodex-Key-Id')!, validatedAt) },
         cryptoKey,
         Buffer.from(ct, 'base64')
       )
@@ -215,7 +219,7 @@ describe('mock-api', () => {
     const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
     const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
     await expect(globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, 'default', validatedAt + 1) },
+      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, prodRes.headers.get('X-Nodex-Key-Id')!, validatedAt + 1) },
       cryptoKey,
       Buffer.from(ct, 'base64')
     )).rejects.toBeInstanceOf(DOMException)
