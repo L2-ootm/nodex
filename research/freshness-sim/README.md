@@ -5,7 +5,8 @@ Node 24+ (run on 26.13), no dependencies, nothing installed. All output is model
 ## 1. Seeded comparison harness
 
 ```
-node run.mjs                 # 10 scenarios x 5 seeds x 7 arms -> out/results.csv, out/summary.md, hypothesis verdicts
+node run.mjs                 # 10 scenarios x 5 seeds x 12 arms -> out/results.csv, out/summary.md, hypothesis verdicts
+node run.mjs --seeds 30      # (at 30 seeds the original cut check H3a fails; recorded, not re-tuned)
 node run.mjs --seeds 30      # more seeds; --scenario adversarial; --duration 600; --strict (exit 1 on a failed check)
 node test.mjs                # determinism, paired workload, and 4 mutations the oracle must catch
 ```
@@ -26,3 +27,7 @@ node guard-demo/server.mjs       # http://localhost:4810  and  http://localhost:
 - `guard-demo/guard.js`: the drop-in. One script tag, no Service Worker, no peers. Verifies the origin's signature, digest and validity window on a calibrated monotonic clock.
 - `guard-demo/server.mjs`: demo origin (`signed()` is the whole server-side integration), a cache that keeps responses 20 s, a tampering path, a receipt endpoint.
 - `guard-demo/index.html`: the page a prospect sees. Not checked in a real browser in this session; the self-test covers the logic only.
+
+## Arms added after the first results (exploratory)
+
+`nodex-pull`, `nodex-pullbg`, `nodex-pulledge`, `nodex-edgebg` and `nodex-shipped` model the renewal paths that were actually built. `nodex-shipped` is the current implementation (edge-served 1 s proof plus peer proof exchange). Their efficiency and latency checks are marked `exploratory` in `prereg.json`, use the original thresholds, and do not gate `--strict`; their safety checks do. Latest 30-seed results: `RESULTS-30-seeds.md`.

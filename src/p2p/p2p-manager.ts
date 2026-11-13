@@ -812,7 +812,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
       // Serve path — forward inbound peer request to SW via P2P_FETCH_SERVE (VOL-05 D-10)
       const req = data as PeerFetchRequest
       if (!req.reqId || !req.key) return
-      askSwToServe(req.key)
+      askSwToServe(req.key, req.proofOnly === true)
         .then((result) => {
           const response: PeerFetchResponse = {
             type: 'CACHE_FETCH_RESPONSE',
@@ -836,7 +836,7 @@ function connectToPeer(peerId: string, polite: boolean, role: PeerRole = 'local'
 // askSwToServe — bridge to SW via P2P_FETCH_SERVE + MessageChannel (T-04-05)
 // ---------------------------------------------------------------------------
 
-function askSwToServe(key: string): Promise<{ found: boolean; payload?: string; seq?: number }> {
+function askSwToServe(key: string, proofOnly = false): Promise<{ found: boolean; payload?: string; seq?: number }> {
   return new Promise((resolve) => {
     const controller = navigator.serviceWorker.controller
     if (!controller) {
@@ -851,7 +851,7 @@ function askSwToServe(key: string): Promise<{ found: boolean; payload?: string; 
       const data = event.data as { found: boolean; payload?: string; seq?: number }
       resolve({ found: data.found, payload: data.payload, seq: data.seq })
     }
-    controller.postMessage({ type: 'P2P_FETCH_SERVE', key }, [channel.port2])
+    controller.postMessage({ type: 'P2P_FETCH_SERVE', key, ...(proofOnly ? { proofOnly: true } : {}) }, [channel.port2])
   })
 }
 
@@ -865,7 +865,8 @@ export const MAX_PEER_BUFFERED_BYTES = 262_144
 export function sendCacheFetchRequest(
   conn: PeerConnection,
   key: string,
-  replyPort: MessagePort
+  replyPort: MessagePort,
+  proofOnly = false,
 ): void {
   const reqId = crypto.randomUUID()
 
@@ -894,7 +895,7 @@ export function sendCacheFetchRequest(
     },
   })
 
-  const request: PeerFetchRequest = { type: 'CACHE_FETCH_REQUEST', reqId, key }
+  const request: PeerFetchRequest = { type: 'CACHE_FETCH_REQUEST', reqId, key, ...(proofOnly ? { proofOnly: true } : {}) }
   try {
     conn.cacheFetch.send(JSON.stringify(request))
   } catch (err) {
@@ -938,7 +939,7 @@ function handleSwMessage(event: MessageEvent): void {
     return
   }
 
-  sendCacheFetchRequest(peer, key, replyPort)
+  sendCacheFetchRequest(peer, key, replyPort, event.data.proofOnly === true)
 }
 
 // ---------------------------------------------------------------------------

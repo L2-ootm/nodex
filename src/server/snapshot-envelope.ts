@@ -48,5 +48,8 @@ export async function snapshotEnvelope(input: {
 
 export function renewalHeaders(env: SnapshotEnvelope, seq: number, keyId: string): Record<string, string> {
   return { [PROOF_HEADER]: env.proof, 'X-Nodex-Seq': String(seq), 'X-Nodex-Iv': env.iv,
-    'X-Nodex-Key-Id': keyId, 'X-Nodex-Validated-At': String(env.validatedAt), 'Cache-Control': 'no-store' }
+    'X-Nodex-Key-Id': keyId, 'X-Nodex-Validated-At': String(env.validatedAt),
+    // A shared cache may hold this for 1 s: the signed validUntil, not the cache, bounds staleness, so an
+    // edge hit only shortens the reader's usable window. The browser itself must always revalidate.
+    'Cache-Control': 'public, max-age=0, s-maxage=1' }
 }

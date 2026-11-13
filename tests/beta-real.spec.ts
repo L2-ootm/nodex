@@ -40,14 +40,14 @@ test('tester enrolls, measures a solo run and persists qualified evidence', asyn
 test('two real browsers discover each other through HTTP signaling and deliver a verified peer read', async ({ browser }) => {
   test.setTimeout(60000)
   const contexts = await Promise.all([browser.newContext(), browser.newContext()])
-  const workerFetches: string[] = []
+  const workerFetches: string[][] = contexts.map(() => [])
   const timeStatuses: number[] = []
-  for (const context of contexts) {
-    context.on('request', request => { if (request.serviceWorker()) workerFetches.push(new URL(request.url()).pathname) })
+  contexts.forEach((context, index) => {
+    context.on('request', request => { if (request.serviceWorker()) workerFetches[index]!.push(new URL(request.url()).pathname) })
     context.on('response', response => {
       if (response.request().serviceWorker() && new URL(response.url()).pathname === '/api/time') timeStatuses.push(response.status())
     })
-  }
+  })
   try {
     const room = 'real-http-' + crypto.randomUUID()
     const url = new URL('http://localhost:4176/metrics.html')
@@ -91,22 +91,26 @@ test('two real browsers discover each other through HTTP signaling and deliver a
     expect(delivered).toMatchObject({ status: 200, source: 'peer-fetch', version: seeded.version, body: seeded.body })
     expect(delivered.id).toBeTruthy()
 
-    // The peer's copy carries a 5 s proof. After it expires, a peer read must renew only the small
-    // proof from origin and must not refetch the payload.
-    const beforeRenewal = workerFetches.length
+    // Both copies carry the original 5 s proof. After it expires, peer 0 renews with the small proof
+    // from origin (one request); peer 1 then gets that newer proof from peer 0 and contacts origin for
+    // neither the proof nor the payload.
+    const before = workerFetches.map(list => list.length)
     await pages[1]!.waitForTimeout(6500)
-    const renewed = await pages[1]!.evaluate(async () => {
-      const response = await fetch('/api/products/peer-proof', { headers: { 'X-Nodex-Read-Mode': 'peer' } })
+    const readCached = (page: (typeof pages)[number]) => page.evaluate(async () => {
+      const response = await fetch('/api/products/peer-proof', { headers: { 'X-Nodex-Read-Mode': 'cache' } })
       return { status: response.status, source: response.headers.get('X-Nodex-Source'),
         version: response.headers.get('X-Nodex-Seq'), body: await response.text() }
     })
-    expect(renewed).toMatchObject({ status: 200, source: 'peer-fetch', version: seeded.version, body: seeded.body })
+    const expected = { status: 200, source: 'sw-cache', version: seeded.version, body: seeded.body }
+    expect(await readCached(pages[0]!)).toMatchObject(expected)
+    expect(await readCached(pages[1]!)).toMatchObject(expected)
     // Each worker anchored its freshness clock with a signed, nonce-bound time through the real proxy.
     expect(timeStatuses.length).toBeGreaterThanOrEqual(2)
     expect(timeStatuses.every(status => status === 200)).toBe(true)
-    const afterWait = workerFetches.slice(beforeRenewal)
-    expect(afterWait).toContain('/api/products/peer-proof/proof')
-    expect(afterWait).not.toContain('/api/products/peer-proof')
+    const after = workerFetches.map((list, index) => list.slice(before[index]))
+    expect(after[0]).toContain('/api/products/peer-proof/proof')
+    expect(after[1]).not.toContain('/api/products/peer-proof/proof')
+    for (const list of after) expect(list).not.toContain('/api/products/peer-proof')
   } finally { await Promise.all(contexts.map(context => context.close())) }
 })
 

@@ -11,6 +11,11 @@ export const ARMS = [
   'p2p-gossip',     // ablation: peer cache + invalidation gossip, NO signed validity window
   'nodex-coupled',  // as coded today: proof signs iv+validatedAt per GET, raw client clock
   'nodex-detached', // proposed: payload fixed per version, small renewable proof gossiped, calibrated clock
+  'nodex-shipped',  // as shipped now: edge-served 1 s renewal, proof-only exchange with peers (no gossip, no background renewal)
+  'nodex-edgebg',   // edge-served renewal plus background renewal before expiry
+  'nodex-pulledge', // pull-renew through an edge cache with a short TTL (safe: the signed validUntil, not the cache, bounds staleness)
+  'nodex-pullbg',   // pull-renew plus background renewal when less than renewMinMs of the window is left (stale-while-revalidate for the proof)
+  'nodex-pull',     // as shipped (a965486+): payload fixed per version, every expired reader pulls the small proof from origin, no proof gossip, calibrated clock
 ]
 
 export function mulberry32(a) {
@@ -99,8 +104,12 @@ const JOIN = 0, LEAVE = 1, READ = 2, WRITE = 3, INVAL = 4, PURGE = 5, LINK = 6, 
 export function runArm(arm, p, trace, seed, opt = {}) {
   const rnd = mulberry32(seedOf('arm', arm, seed))
   const u = (lo, hi) => lo + rnd() * (hi - lo)
-  const P2P = arm === 'p2p-gossip' || arm === 'nodex-coupled' || arm === 'nodex-detached'
-  const calibrate = opt.calibrate ?? (arm === 'nodex-detached')
+  const P2P = arm === 'p2p-gossip' || arm === 'nodex-coupled' || arm === 'nodex-detached' || arm === 'nodex-pull' || arm === 'nodex-pullbg' || arm === 'nodex-pulledge' || arm === 'nodex-edgebg' || arm === 'nodex-shipped'
+  const pullBg = arm === 'nodex-pullbg' || arm === 'nodex-edgebg'
+  const pullEdge = arm === 'nodex-pulledge' || arm === 'nodex-edgebg' || arm === 'nodex-shipped'
+  const peerProofs = arm === 'nodex-shipped'
+  const pull = arm === 'nodex-pull' || pullBg || pullEdge // shipped renewal path: origin pull per expired read
+  const calibrate = opt.calibrate ?? (arm === 'nodex-detached' || pull)
   const checkProof = opt.checkProof ?? true
   const DELTA = p.deltaMs, BOUND = p.deltaMs + p.epsMs
   const B = p.payloadBytes, H = p.httpOverheadBytes, PB = p.proofBytes, MO = p.peerMsgBytes
@@ -109,6 +118,8 @@ export function runArm(arm, p, trace, seed, opt = {}) {
   const commits = Array.from({ length: p.keys }, () => [0, 0]) // commits[k][v] = commit time of version v
   const live = Array.from({ length: p.keys }, () => [])
   const edge = Array.from({ length: p.pops * p.keys }, () => null)
+  const proofEdge = Array.from({ length: p.pops * p.keys }, () => null)
+  const PROOF_EDGE_TTL = p.proofEdgeTtlMs ?? 1000
   const st = new Array(trace.sessions.length)
   const m = {
     reads: 0, pathLocal: 0, pathReval: 0, pathPeer: 0, pathEdge: 0, pathOrigin: 0,
@@ -151,14 +162,26 @@ export function runArm(arm, p, trace, seed, opt = {}) {
       q.push(t + u(20, 80), PROOF, n, proof, x)
     }
   }
-  function originProof(x, t) {
-    m.originReqs++; m.originBytes += PB + H
-    setCal(x)
+  function originProof(x, t) { // returns the latency of obtaining the proof
     const k = x.s.key
-    x.proof = { v: head[k], validatedAt: t, validUntil: t + DELTA }
+    let lat = latOrigin(0), validatedAt = t
+    if (pullEdge) {
+      const i = x.s.pop * p.keys + k
+      let e = proofEdge[i]
+      m.edgeReqs++; m.edgeBytes += PB + H
+      if (!e || t - e.at >= PROOF_EDGE_TTL) { m.originReqs++; m.originBytes += PB + H; e = proofEdge[i] = { v: head[k], at: t } }
+      else lat = latEdge(0)
+      validatedAt = e.at
+      x.proof = { v: e.v, validatedAt, validUntil: validatedAt + DELTA }
+    } else {
+      m.originReqs++; m.originBytes += PB + H
+      x.proof = { v: head[k], validatedAt, validUntil: t + DELTA }
+    }
+    setCal(x)
     remember(x, x.proof)
-    if (head[k] > x.barrier) x.barrier = head[k]
-    flood(x, x.proof, null, t)
+    if (x.proof.v > x.barrier) x.barrier = x.proof.v
+    if (!pull) flood(x, x.proof, null, t)
+    return lat
   }
   function edgeFetch(x, t, ttl) { // returns edge entry, refreshing from origin when expired
     const i = x.s.pop * p.keys + x.s.key, h = head[x.s.key]
@@ -231,11 +254,11 @@ export function runArm(arm, p, trace, seed, opt = {}) {
     } else { // nodex-detached
       let fetchedProof = false
       let fromOrigin = false
-      if (calibrate && !x.cal) { originProof(x, t); l += latOrigin(0); fetchedProof = true; fromOrigin = true }
+      if (calibrate && !x.cal) { l += originProof(x, t); fetchedProof = true; fromOrigin = true }
       let now = clock(x, t)
       const ok = e => e && e.v >= x.barrier && validWindow(e, now)
       if (!ok(x.proof)) {
-        const cands = liveNbrs(x).filter(n => n.s.adv || (n.proof && n.proof.v >= x.barrier && n.proof.validUntil > t + 200))
+        const cands = pull && !peerProofs ? [] : liveNbrs(x).filter(n => n.s.adv || (n.proof && n.proof.v >= x.barrier && n.proof.validUntil > t + 200))
         if (cands.length) {
           const n = pick(cands)
           m.peerAttempts++; m.peerControlBytes += PB + MO
@@ -243,7 +266,7 @@ export function runArm(arm, p, trace, seed, opt = {}) {
           if (ok(got)) { x.proof = got; l += latPeer(0); fetchedProof = true }
           else { m.peerRejects++; l += p.peerDeadlineMs }
         }
-        if (!ok(x.proof)) { originProof(x, t); l += latOrigin(0); fetchedProof = true; fromOrigin = true; now = clock(x, t) }
+        if (!ok(x.proof)) { l += originProof(x, t); fetchedProof = true; fromOrigin = true; now = clock(x, t) }
       }
       v = x.proof.v
       if (x.payloadV === v) { path = fetchedProof ? 'Reval' : 'Local'; l += fetchedProof ? 0 : latLocal() }
@@ -264,7 +287,7 @@ export function runArm(arm, p, trace, seed, opt = {}) {
       // Early renewals are thinned by the room size (known from signaling presence) so origin proof work
       // does not grow with the audience; below renewMinMs every reader renews (deadline).
       const left = x.proof.validUntil - now
-      if (left < p.renewMinMs || (left < x.s.theta && rnd() < p.renewTarget / live[k].length)) { m.proofRenewals++; originProof(x, t) }
+      if ((pullBg && left < p.renewMinMs) || !pull && (left < p.renewMinMs || (left < x.s.theta && rnd() < p.renewTarget / live[k].length))) { m.proofRenewals++; originProof(x, t) }
     }
 
     if (v > x.barrier) x.barrier = v

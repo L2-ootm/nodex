@@ -170,6 +170,7 @@ describe('mock-api', () => {
     const renewal = await app.request('/api/products/7/proof')
     clock.mockRestore()
     expect(renewal.status).toBe(204)
+    expect(renewal.headers.get('Cache-Control')).toBe('public, max-age=0, s-maxage=1')
     const fresh = decodeProof(renewal.headers.get(PROOF_HEADER))!
     expect(fresh.digest).toBe(held.digest)
     expect(fresh.iv).toBe(held.iv)

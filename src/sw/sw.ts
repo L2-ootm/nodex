@@ -527,7 +527,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
       } catch { replyPort?.postMessage({ ok: false }) }
     })())
   } else if (type === 'GET_CACHE_STATE') {
-    const { key } = event.data as { key: string }
+    const { key, proofOnly } = event.data as { key: string; proofOnly?: boolean }
     const replyPort = event.ports[0]
     event.waitUntil(
       getCacheState(key).then((state) => {
@@ -535,7 +535,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
       })
     )
   } else if (type === 'REVALIDATE_KEY') {
-    const { key } = event.data as { key: string }
+    const { key, proofOnly } = event.data as { key: string; proofOnly?: boolean }
     const replyPort = event.ports[0]
     event.waitUntil(
       revalidateKey(key).then((result) => {
@@ -544,7 +544,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
     )
   } else if (type === 'P2P_FETCH_SERVE') {
     // Serve cached payload to a requesting peer via score gate (T-04-04, VOL-05 D-10)
-    const { key } = event.data as { key: string }
+    const { key, proofOnly } = event.data as { key: string; proofOnly?: boolean }
     const replyPort = event.ports[0]
     event.waitUntil(
       (async () => {
@@ -561,7 +561,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
             replyPort?.postMessage({ found: false })
             return
           }
-          const payload = await cached.text()
+          const payload = proofOnly ? '' : await cached.text()
           const seq = parseInt(cached.headers.get('X-Nodex-Seq') ?? '1', 10)
           if (!isFresh(key, seq)) {
             replyPort?.postMessage({ found: false })
@@ -587,7 +587,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
           // Re-serve the encrypted payload as-is (server stores ciphertext; SW never decrypts for peer serve)
           replyPort?.postMessage({
             found: true,
-            payload: JSON.stringify({ ciphertext: payload, iv, keyId, seq, validatedAt,
+            payload: JSON.stringify({ ...(proofOnly ? {} : { ciphertext: payload }), iv, keyId, seq, validatedAt,
               proof: cached.headers.get(PROOF_HEADER) }),
           })
         } catch (err) {
@@ -703,30 +703,92 @@ async function ensureTrustedClock(): Promise<void> {
   await clockSync
 }
 const PROOF_RENEWAL_TIMEOUT_MS = 3_000
+const PEER_PROOF_TIMEOUT_MS = 400
+const PEER_PROOF_MARGIN_MS = 500
 /**
- * A cache or peer copy whose signed window has closed is renewed with a small proof from origin
- * instead of refetching the payload. Accepted only if the renewal names the same version, IV, key
- * and ciphertext digest as the held bytes; anything else returns null so the caller falls back to
- * a full origin fetch. Verification of the renewed proof against the held ciphertext still runs
- * in decryptPayloadResponse, so renewal can only extend freshness, never change content.
+ * Asks neighbouring tabs' peers for the latest signed proof of a payload this worker already holds
+ * (about 0.8 KB instead of a payload). A peer cannot forge a proof and a replayed one is only usable
+ * until its signed validUntil, so peer-supplied proofs keep the same staleness bound. Anything that
+ * does not name exactly the held bytes, or has little window left, is ignored.
+ */
+async function peerProofFor(key: string, held: NonNullable<ReturnType<typeof decodeProof>>,
+  verify: (rawProof: string) => Promise<boolean>): Promise<string | null> {
+  if (runtimeFlags.disableP2P) return null
+  const clients = (await self.clients.matchAll({ type: 'window', includeUncontrolled: false })).slice(0, 16)
+  if (!clients.length) return null
+  return new Promise(resolve => {
+    const channels: MessageChannel[] = []
+    let finished = false
+    let pending = clients.length
+    const finish = (proof: string | null) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timer)
+      for (const channel of channels) { channel.port1.close(); channel.port2.close() }
+      resolve(proof)
+    }
+    const timer = setTimeout(() => finish(null), PEER_PROOF_TIMEOUT_MS)
+    for (const client of clients) {
+      const channel = new MessageChannel()
+      channels.push(channel)
+      channel.port2.onmessage = async event => {
+        if (finished) return
+        let accepted: string | null = null
+        try {
+          const data = event.data
+          if (data?.type === 'P2P_FETCH_RESPONSE' && data.found && typeof data.payload === 'string' && data.payload.length <= 8_192) {
+            const raw = (JSON.parse(data.payload) as { proof?: unknown }).proof
+            const proof = typeof raw === 'string' ? decodeProof(raw) : null
+            if (proof && proof.kind === 'content' && proof.scope === 'public' && proof.resource === key &&
+              proof.version === held.version && proof.iv === held.iv && proof.encryptionKeyId === held.encryptionKeyId &&
+              proof.digest === held.digest && proof.validatedAt > held.validatedAt &&
+              proof.validUntil > trustedNow() + PEER_PROOF_MARGIN_MS && await verify(raw as string)) accepted = raw as string
+          }
+        } catch { /* A malformed peer reply is treated as no reply. */ }
+        if (accepted) finish(accepted)
+        else if (--pending === 0) finish(null)
+      }
+      try { client.postMessage({ type: 'P2P_FETCH', key, proofOnly: true }, [channel.port1]) }
+      catch { if (--pending === 0) finish(null) }
+    }
+  })
+}
+/**
+ * A cache or peer copy whose signed window has closed is renewed instead of refetched: first from a
+ * neighbouring peer's newer proof, else with a small proof from origin. Accepted only if the proof
+ * names the same version, IV, key and ciphertext digest as the held bytes; anything else returns null
+ * so the caller falls back to a full origin fetch. Verification of the renewed proof against the held
+ * ciphertext still runs in decryptPayloadResponse, so renewal can only extend freshness, never change content.
  */
 async function renewedCandidate(key: string, response: Response, seq: number): Promise<Response | null> {
   const held = decodeProof(response.headers.get(PROOF_HEADER))
   if (!held) return response // Normal verification rejects it.
   if (held.validUntil > trustedNow()) return response
   try {
-    const renewal = await fetch(new Request(new URL(`${key}/proof`, self.location.origin), {
-      cache: 'no-store', signal: AbortSignal.timeout(PROOF_RENEWAL_TIMEOUT_MS) }))
-    if (!renewal.ok || renewal.type === 'opaque') return null
-    const fresh = decodeProof(renewal.headers.get(PROOF_HEADER))
-    const validatedAt = Number(renewal.headers.get('X-Nodex-Validated-At'))
-    if (!fresh || fresh.kind !== 'content' || fresh.scope !== 'public' || fresh.resource !== key ||
-      fresh.version !== seq || fresh.iv !== held.iv || fresh.encryptionKeyId !== held.encryptionKeyId ||
-      fresh.digest !== held.digest || fresh.validatedAt !== validatedAt) return null
+    // A peer proof is checked here, signature included, so a hostile peer that answers first with a
+    // well-formed but forged proof costs one cheap origin renewal, not a full payload fetch.
+    const heldBody = await response.clone().text()
+    const identity = await publisherIdentity(held.signingKeyId)
+    let proofHeader = identity ? await peerProofFor(key, held, async raw => {
+      const candidate = decodeProof(raw)
+      return !!candidate && await verifyProof(candidate, identity, key, 'content', heldBody, trustedNow())
+    }) : null
+    let validatedAt = proofHeader ? decodeProof(proofHeader)!.validatedAt : 0
+    if (!proofHeader) {
+      const renewal = await fetch(new Request(new URL(`${key}/proof`, self.location.origin), {
+        cache: 'no-store', signal: AbortSignal.timeout(PROOF_RENEWAL_TIMEOUT_MS) }))
+      if (!renewal.ok || renewal.type === 'opaque') return null
+      const fresh = decodeProof(renewal.headers.get(PROOF_HEADER))
+      validatedAt = Number(renewal.headers.get('X-Nodex-Validated-At'))
+      if (!fresh || fresh.kind !== 'content' || fresh.scope !== 'public' || fresh.resource !== key ||
+        fresh.version !== seq || fresh.iv !== held.iv || fresh.encryptionKeyId !== held.encryptionKeyId ||
+        fresh.digest !== held.digest || fresh.validatedAt !== validatedAt) return null
+      proofHeader = renewal.headers.get(PROOF_HEADER)!
+    }
     const headers = new Headers(response.headers)
-    headers.set(PROOF_HEADER, renewal.headers.get(PROOF_HEADER)!)
+    headers.set(PROOF_HEADER, proofHeader)
     headers.set('X-Nodex-Validated-At', String(validatedAt))
-    return new Response(await response.clone().text(), { status: response.status, headers })
+    return new Response(heldBody, { status: response.status, headers })
   } catch { return null }
 }
 async function acceptResponse(key: string, response: Response, start: number,

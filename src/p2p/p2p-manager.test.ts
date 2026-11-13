@@ -59,6 +59,17 @@ describe('p2p-manager', () => {
       expect(pendingRequests.size).toBe(0)
     })
 
+    it('marks a proof-only request and omits the flag for payload requests', () => {
+      vi.useFakeTimers()
+      const first = fakeConn('open', 0)
+      sendCacheFetchRequest(first.conn, 'k', fakePort() as never, true)
+      expect(JSON.parse(first.send.mock.calls[0]![0])).toMatchObject({ type: 'CACHE_FETCH_REQUEST', key: 'k', proofOnly: true })
+      const second = fakeConn('open', 0)
+      sendCacheFetchRequest(second.conn, 'k', fakePort() as never)
+      expect(JSON.parse(second.send.mock.calls[0]![0])).not.toHaveProperty('proofOnly')
+      vi.useRealTimers()
+    })
+
     it('sends and registers a pending request when under every limit', () => {
       vi.useFakeTimers()
       const { send, conn } = fakeConn('open', MAX_PEER_BUFFERED_BYTES)

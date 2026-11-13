@@ -166,6 +166,8 @@ export interface PeerFetchRequest {
   type: 'CACHE_FETCH_REQUEST'
   reqId: string
   key: string
+  /** Ask only for the held entry's latest signed proof (about 0.8 KB), not the payload. */
+  proofOnly?: boolean
 }
 
 export interface PeerFetchResponse {

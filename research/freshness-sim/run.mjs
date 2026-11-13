@@ -86,8 +86,8 @@ for (const h of prereg.hypotheses) {
     const badness = h.type === 'ratio_ge' || h.type === 'positive' ? -val : val
     if (worst === null || badness > worst.badness) worst = { badness, val, s, seed }
   }
-  if (!ok) failed++
-  md += `${ok ? 'PASS' : 'FAIL'} ${h.id}  ${h.text}\n     worst seed: ${Number(worst.val.toFixed(4))} (${worst.s}, seed ${worst.seed})\n`
+  if (!ok && !h.exploratory) failed++
+  md += `${h.exploratory ? 'EXPLORATORY ' : ''}${ok ? 'PASS' : 'FAIL'} ${h.id}  ${h.text}\n     worst seed: ${Number(worst.val.toFixed(4))} (${worst.s}, seed ${worst.seed})\n`
 }
 md += '```\n'
 writeFileSync(join(outDir, 'summary.md'), md)

@@ -227,6 +227,47 @@ describe('proof renewal for held ciphertext', () => {
     expect(urls.filter(u => u.endsWith('/api/products/1')).length).toBe(1)
   })
 
+  const peerReplies = (proofs: Array<string | null>) => {
+    ;(self as any).clients.matchAll = async () => proofs.map(proof => ({ postMessage: (message: any, ports: MessagePort[]) => {
+      if (message.type !== 'P2P_FETCH' || message.proofOnly !== true) return
+      ports[0]!.postMessage({ type: 'P2P_FETCH_RESPONSE', found: proof !== null,
+        ...(proof ? { payload: JSON.stringify({ proof }) } : {}) })
+    } }))
+  }
+  const proofOf = async (seq: number, body = 'AA==') => (await renewal(seq, body)).headers.get(PROOF_HEADER)!
+
+  it('renews from a neighbouring peer proof without contacting origin for the proof or the payload', async () => {
+    await serveCached(5, 10_000)
+    peerReplies([await proofOf(5)])
+    const urls = routeFetch([])
+    expect((await read()).status).toBe(200)
+    expect(urls.filter(u => u.endsWith('/api/products/1') || u.endsWith('/proof'))).toEqual([])
+    expect(state.put).toHaveBeenCalledTimes(1) // the peer's newer proof is persisted too
+  })
+
+  it('ignores a peer proof for different bytes, an old proof, or no reply and renews from origin', async () => {
+    for (const bad of [await proofOf(5, 'AQ=='), (await held(5, 10_000)).proof, null]) {
+      vi.clearAllMocks(); state.cached.mockResolvedValue(null)
+      await serveCached(5, 10_000)
+      peerReplies([bad])
+      const urls = routeFetch([await renewal(5)])
+      expect((await read()).status).toBe(200)
+      expect(urls.filter(u => u.endsWith('/api/products/1/proof')).length).toBe(1)
+      expect(urls.filter(u => u.endsWith('/api/products/1'))).toEqual([])
+    }
+  })
+
+  it('a peer proof with matching fields but a forged signature is rejected and origin renewal is used', async () => {
+    await serveCached(5, 10_000)
+    const good = JSON.parse(atob(await proofOf(5)))
+    good.signature = good.signature.slice(0, -4) + (good.signature.endsWith('AAAA') ? 'BBBB' : 'AAAA')
+    peerReplies([btoa(JSON.stringify(good))])
+    const urls = routeFetch([await renewal(5)])
+    expect((await read()).status).toBe(200)
+    expect(urls.filter(u => u.endsWith('/api/products/1/proof')).length).toBe(1)
+    expect(urls.filter(u => u.endsWith('/api/products/1'))).toEqual([])
+  })
+
   it('does not call the renewal route for a still-fresh copy', async () => {
     await serveCached(5, 500)
     const urls = routeFetch([])
