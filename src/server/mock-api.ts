@@ -12,8 +12,8 @@ import { DEFAULT_SIGNALING_ROOM } from '../shared/config.js'
 import { sessionKeyId } from './session-key.js'
 import { snapshotEnvelope, renewalHeaders } from './snapshot-envelope.js'
 import { canonicalSnapshot } from './sequence-authority.js'
-import { getPublisher, publishProof } from './publisher.js'
-import { PROOF_HEADER } from '../crypto/publisher-proof.js'
+import { getPublisher, publishProof, publishTime } from './publisher.js'
+import { PROOF_HEADER, TIME_NONCE_PATTERN } from '../crypto/publisher-proof.js'
 import { getPeers } from './signaling-server.js'
 import { cloneSnapshot, MAX_SAFE_SEQUENCE } from './sequence-authority.js'
 import { bodyLimit } from 'hono/body-limit'
@@ -148,6 +148,13 @@ app.get('/api/products/:id', async (c) => {
     'X-Nodex-Content-Hash': 'sha256:' + contentHash,
     'X-Nodex-Etag': '"v' + String(r.seq) + '"',
   })
+})
+
+// GET /api/time?nonce=… — signed server time bound to the caller's nonce (clock anchoring)
+app.get('/api/time', async (c) => {
+  const nonce = c.req.query('nonce') ?? ''
+  if (!TIME_NONCE_PATTERN.test(nonce)) return c.json({ error: 'invalid nonce' }, 400)
+  return c.json(await publishTime(nonce), 200, { 'Cache-Control': 'no-store' })
 })
 
 // GET /api/products/:id/proof — small signed renewal for a ciphertext the reader already holds

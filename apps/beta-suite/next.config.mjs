@@ -25,6 +25,10 @@ const nextConfig = {
         destination: `${apiOrigin}/api/session-key`,
       },
       {
+        source: '/api/time',
+        destination: `${apiOrigin}/api/time`,
+      },
+      {
         source: '/api/publisher-key',
         destination: `${apiOrigin}/api/publisher-key`,
       },

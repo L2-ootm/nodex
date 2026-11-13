@@ -8,7 +8,8 @@ import { PROOF_HEADER } from '../../src/crypto/publisher-proof.js'
 export const config = { runtime: 'nodejs' }
 
 async function logCapture(path: string, seq: number, ivB64: string, ctSample: string): Promise<void> {
-  if (!process.env['BLOB_READ_WRITE_TOKEN']) return
+  // Opt-in demo capture only: it costs a blob read and write per payload read.
+  if (process.env['NODEX_INTERCEPTOR_CAPTURE'] !== '1' || !process.env['BLOB_READ_WRITE_TOKEN']) return
   const blobKey = 'nodex-beta/interceptor-captures.jsonl'
   let existing = ''
   try {

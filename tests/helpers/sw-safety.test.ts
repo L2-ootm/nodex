@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { publishProof, getPublisher } from '../../src/server/publisher.js'
-import { PROOF_HEADER } from '../../src/crypto/publisher-proof.js'
+import { PROOF_HEADER, signTime } from '../../src/crypto/publisher-proof.js'
 
 const state = vi.hoisted(() => ({
   records: new Map<string, any>(), cached: vi.fn(), put: vi.fn(), decrypt: vi.fn(), metric: vi.fn(),
@@ -20,6 +20,20 @@ vi.mock('../../src/sw/idb.js', () => ({ getDb: async () => {
   }
 } }))
 vi.mock('../../src/crypto/crypto.js', () => ({ buildPayloadAad: () => new Uint8Array(), decrypt: state.decrypt }))
+// '/api/time' is answered here so a clock challenge never consumes queued origin responses.
+// 'unavailable' (default) forces the origin-anchoring fallback; 'live' signs the caller's nonce;
+// 'replay' returns a stamp for a different nonce, as a cached response would.
+const realNow = Date.now.bind(Date)
+let timeMode: 'unavailable' | 'live' | 'replay' = 'unavailable'
+async function timeStub(url: string): Promise<Response | null> {
+  if (!url.includes('/api/time')) return null
+  if (timeMode === 'unavailable') return new Response('unavailable', { status: 503 })
+  const nonce = timeMode === 'replay' ? 'A'.repeat(24) : new URL(url).searchParams.get('nonce')!
+  // Server time uses the real clock even when a test skews the client's Date.now.
+  const { identity, privateKey } = await getPublisher()
+  return Response.json(await signTime({ format: 1, nonce, serverMs: realNow(), tenant: identity.tenant,
+    epoch: identity.epoch, signingKeyId: identity.keyId }, privateKey))
+}
 let handlers: Record<string, Function[]>
 let responses: Response[]
 async function worker(importKey = true) {
@@ -51,17 +65,58 @@ async function origin(seq: number, tampered = false) {
   } })
 }
 beforeEach(async () => {
+  timeMode = 'unavailable'
   vi.resetModules(); vi.clearAllMocks(); state.records.clear(); state.unavailable = false; responses = []
   state.cached.mockResolvedValue(null); state.put.mockResolvedValue(undefined)
   state.metric.mockResolvedValue(undefined); state.decrypt.mockResolvedValue(new TextEncoder().encode('{}'))
   vi.stubGlobal('fetch', vi.fn(async (request: string | Request) => {
     const url = typeof request === 'string' ? request : request.url
+    const time = await timeStub(url); if (time) return time
     if (url.endsWith('/api/publisher-key')) return Response.json((await getPublisher()).identity)
     return responses.shift() ?? new Response('unavailable', { status: 503 })
   }))
   await worker()
 })
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs() })
+
+describe('signed time challenge', () => {
+  async function staleOrigin(ageMs: number) {
+    const validatedAt = realNow() - ageMs
+    const body = 'AA=='
+    const proof = await publishProof({ resource: '/api/products/1', version: 1, validatedAt,
+      body, iv: 'AA==', encryptionKeyId: 'test-aes' })
+    return new Response(body, { headers: { 'X-Nodex-Seq': '1', 'X-Nodex-Validated-At': String(validatedAt),
+      'X-Nodex-Iv': 'AA==', 'X-Nodex-Key-Id': 'test-aes', 'X-Nodex-Cache-Scope': 'public', [PROOF_HEADER]: proof } })
+  }
+  const productCache = () => (fetch as any).mock.calls
+    .map(([r]: [Request | string]) => r).filter((r: any) => typeof r !== 'string' && r.url.endsWith('/api/products/1'))
+    .map((r: Request) => r.cache)
+
+  it('rejects an old signed first origin response once the clock is anchored by a nonce-bound stamp', async () => {
+    timeMode = 'live'
+    responses.push(await staleOrigin(30_000))
+    expect((await read()).status).not.toBe(200)
+  })
+
+  it('still admits a fresh origin read and allows normal HTTP caching when the client clock is 60 s off', async () => {
+    timeMode = 'live'
+    for (const skew of [60_000, -60_000]) {
+      vi.resetModules(); await worker()
+      responses.push(await staleOrigin(0))
+      vi.spyOn(Date, 'now').mockReturnValue(realNow() + skew)
+      expect((await read()).status).toBe(200)
+      vi.restoreAllMocks()
+    }
+    expect(productCache()).toEqual(['default', 'default'])
+  })
+
+  it('ignores a replayed stamp for a different nonce and falls back to origin anchoring', async () => {
+    timeMode = 'replay'
+    responses.push(await staleOrigin(0))
+    expect((await read()).status).toBe(200)
+    expect(productCache()).toEqual(['no-store'])
+  })
+})
 
 describe('origin-calibrated freshness clock', () => {
   for (const skew of [60_000, -60_000]) {
@@ -115,6 +170,7 @@ describe('proof renewal for held ciphertext', () => {
     const urls: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (request: string | Request) => {
       const url = typeof request === 'string' ? request : request.url
+    const time = await timeStub(url); if (time) return time
       urls.push(url)
       if (url.endsWith('/api/publisher-key')) return Response.json((await getPublisher()).identity)
       if (url.endsWith('/api/products/1/proof')) {
@@ -138,6 +194,10 @@ describe('proof renewal for held ciphertext', () => {
     expect(response.status).toBe(200)
     expect(urls.filter(u => u.endsWith('/api/products/1'))).toEqual([])
     expect(urls.some(u => u.endsWith('/api/products/1/proof'))).toBe(true)
+    // The renewed proof is persisted so the next read inside the window needs no renewal.
+    expect(state.put).toHaveBeenCalledTimes(1)
+    const stored = state.put.mock.calls[0]![1] as Response
+    expect(Number(stored.headers.get('X-Nodex-Validated-At'))).toBeGreaterThan(Date.now() - 2_000)
   })
 
   it('falls back to a full origin fetch when the renewal names different bytes', async () => {
@@ -206,6 +266,7 @@ describe('verified SW read pipeline', () => {
     const keyEndpoint = vi.fn()
     vi.stubGlobal('fetch', vi.fn(async (request: string | Request) => {
       const url = typeof request === 'string' ? request : request.url
+    const time = await timeStub(url); if (time) return time
       if (url.endsWith('/api/publisher-key')) return Response.json((await getPublisher()).identity)
       if (url.endsWith('/api/session-key')) { keyEndpoint(); return new Response('unauthorized', { status: 401 }) }
       return responses.shift() ?? new Response('unavailable', { status: 503 })

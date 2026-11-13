@@ -1,0 +1,6 @@
+payload_plaintext_bytes,full_response_bytes,renewal_response_bytes,renewal_fraction
+256,1506,839,0.557
+1024,2530,839,0.332
+8192,12086,839,0.069
+32768,44858,839,0.019
+61440,83086,839,0.010

@@ -54,6 +54,15 @@ An optional calibrated price JSON supplies `originRequestUsd`, `controlRequestUs
 
 For a defensible pilot, recruit a narrowly defined repeated-read use case, compare against its actual browser/CDN configuration, randomize the assigned path, keep version/payload and latency quality equal, and reconcile avoided origin work with control, relay, RPC, CPU and operational expense. Measure onboarding completion and repeated use as adoption outcomes. The short sequential beta run is a debugging and measurement artifact; it does not establish those customer outcomes.
 
+## Deploying the freshness protocol (v3)
+
+- **Format break.** The payload encryption AAD changed from `nodex:v2` to `nodex:v3` and the IV is now deterministic. A browser still running a pre-v3 Service Worker cannot decrypt v3 responses and receives 502 until the worker updates (a new worker installs on navigation and calls `skipWaiting`). Deploy the Service Worker and the API together; expect a short window of failures for open tabs. Old cache entries fail verification and are refetched.
+- **New endpoints.** `/api/products/:id/proof` (small signed renewal) and `/api/time?nonce=` (signed, nonce-bound server time used to anchor the freshness clock). Both must be reachable same-origin from the Service Worker: the Next rewrites and the front proxy list `/api/time`, and `/api/products/:path*` already covers the proof route. If `/api/time` is unreachable the reader still works but falls back to anchoring from a no-store origin read, which a stale edge copy could set in the past.
+- **Forced downgrade.** An attacker who drops or slows `/api/time` beyond its 3 s timeout returns the worker to the weaker no-store origin anchoring, retried every 30 s, and nothing currently logs or measures that fallback. Treat it as a known limit and add a metric before a pilot that relies on the stricter bound. The challenge only trusts identities fetched from `/api/publisher-key`, never a key named by the reply.
+- **Edge caching.** Never let a CDN cache `/api/time`, `/api/products/:id/proof` or the payload route without revalidation; `cache: 'no-store'` on the client does not bypass an edge.
+- **Cost knob.** `NODEX_INTERCEPTOR_CAPTURE=1` re-enables the demo blob capture (one blob read and write per payload read). Leave it off in any cost measurement.
+- **Rate limits.** The per-credential limits in `api/lib/rate-limit.ts` are per serverless instance. A hard global ceiling needs a shared store.
+
 ## Validation limits
 
 Automated browser checks establish loopback behavior in Chromium. PostgreSQL/WASM checks execute and reapply SQL and assert rollback/contracts on one connection. Neither proves hosted PostgREST permissions in the deployed project, cross-instance scheduling, real WAN/NAT, TURN acceptance, mobile suspension, geographic reach, bills, adoption or legal defensibility. Historical technical and legal-attribution reports retain their own scope and revision.

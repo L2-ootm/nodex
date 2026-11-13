@@ -4,6 +4,7 @@ export const config = {
   matcher: [
     '/api/signal/:path*',
     '/api/session-key',
+    '/api/time',
     '/api/turn-credentials',
     '/api/invalidate/(.*)',  // (.*) needed to match nested paths like /products/1
     '/api/products/:path*',
@@ -18,6 +19,7 @@ const WINDOW_MS = 60_000
 const LIMITS: Record<string, number> = {
   signal: 1200,    // 2 nodes × 2req/s (poll+preflight) × 60s × headroom
   key: 20,         // fetched once on load
+  time: 30,        // one signed clock challenge per worker start, plus retries every 30 s
   turn: 20,        // fetched once on init
   invalidate: 10,  // admin-only, infrequent
   products: 200,   // product reads, CDN-style
@@ -27,6 +29,7 @@ const LIMITS: Record<string, number> = {
 function routeGroup(pathname: string): string | null {
   if (pathname.startsWith('/api/signal/')) return 'signal'
   if (pathname === '/api/session-key') return 'key'
+  if (pathname === '/api/time') return 'time'
   if (pathname === '/api/turn-credentials') return 'turn'
   if (pathname.startsWith('/api/invalidate/')) return 'invalidate'
   if (pathname.startsWith('/api/products/')) return 'products'

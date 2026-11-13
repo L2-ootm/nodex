@@ -34,7 +34,7 @@ import {
 } from '../shared/config.js'
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { buildPayloadAad, decrypt as aesDecode } from '../crypto/crypto.js'
-import { decodeProof, verifyProof, PROOF_HEADER, type PublisherIdentity } from '../crypto/publisher-proof.js'
+import { decodeProof, verifyProof, verifyTime, PROOF_HEADER, type PublisherIdentity, type SignedTime } from '../crypto/publisher-proof.js'
 import { anchorTrustedClock, hasTrustedAnchor, trustedNow } from './trusted-clock.js'
 import { computeScore, classifyTier, deriveTTL, recordActivity } from '../volatility/volatility.js'
 import {
@@ -671,6 +671,37 @@ function admitted(key: string, seq: number, validatedAt: number, peer: boolean):
     sessionObservedVersion: observedVersionMap.get(key) ?? 0,
     latestKnownVersion: getLatestSeq(key), now: trustedNow() }).admitted
 }
+const CLOCK_SYNC_TIMEOUT_MS = 3_000
+const CLOCK_SYNC_RETRY_MS = 30_000
+let clockSync: Promise<void> | null = null
+let clockRetryAt = 0
+/**
+ * Anchors the freshness clock with a signed, nonce-bound server time. The stamp lies within the
+ * round trip, so serverMs + RTT is an upper bound on true time: the reader's clock can run ahead by
+ * at most the RTT (rejecting slightly early) but never behind (never admitting stale). A cached or
+ * replayed response cannot echo a fresh nonce, so a stale edge copy can no longer set the clock in
+ * the past. Failure is non-fatal: the reader falls back to anchoring from a no-store origin read.
+ */
+async function syncTrustedClock(): Promise<void> {
+  const nonce = btoa(Array.from(crypto.getRandomValues(new Uint8Array(18)), b => String.fromCharCode(b)).join(''))
+    .replace(/\+/g, '-').replace(/\//g, '_')
+  try {
+    const t0 = self.performance.now()
+    const response = await fetch(new Request(new URL(`/api/time?nonce=${nonce}`, self.location.origin), {
+      cache: 'no-store', signal: AbortSignal.timeout(CLOCK_SYNC_TIMEOUT_MS) }))
+    const rtt = self.performance.now() - t0
+    if (!response.ok || response.type === 'opaque' || rtt > CLOCK_SYNC_TIMEOUT_MS) throw new Error('time unavailable')
+    const stamp = await response.json() as SignedTime
+    const identity = await publisherIdentity(stamp.signingKeyId)
+    if (!identity || identity.keyId !== stamp.signingKeyId || !await verifyTime(stamp, identity, nonce)) throw new Error('time rejected')
+    anchorTrustedClock(stamp.serverMs + rtt) // upper bound: never behind true time, even if the reply was delayed
+  } catch { clockRetryAt = self.performance.now() + CLOCK_SYNC_RETRY_MS }
+}
+async function ensureTrustedClock(): Promise<void> {
+  if (hasTrustedAnchor() || self.performance.now() < clockRetryAt) return
+  clockSync ??= syncTrustedClock().finally(() => { clockSync = null })
+  await clockSync
+}
 const PROOF_RENEWAL_TIMEOUT_MS = 3_000
 /**
  * A cache or peer copy whose signed window has closed is renewed with a small proof from origin
@@ -707,9 +738,11 @@ async function acceptResponse(key: string, response: Response, start: number,
   const seq = Number(response.headers.get('X-Nodex-Seq'))
   let validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
   if (!Number.isSafeInteger(seq) || seq < 1 || !Number.isSafeInteger(validatedAt) || validatedAt < 1) return null
+  let wasRenewed = false
   if (source !== 'server-fallback') {
     const renewed = await renewedCandidate(key, response, seq)
     if (!renewed) return null
+    wasRenewed = renewed !== response
     response = renewed
     validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
   }
@@ -725,7 +758,8 @@ async function acceptResponse(key: string, response: Response, start: number,
     }
     return null
   }
-  if (store && trackPublicVersion && shareableResponse(response)) {
+  // A renewed proof is written back so a hot key renews once per window, not on every read.
+  if ((store || wasRenewed) && trackPublicVersion && shareableResponse(response)) {
     await putCachedEntry(key, response, seq, deriveTTL(classifyTier(scoreCache.get(key) ?? VOL_COLD_START)), validatedAt, current)
   }
   // All awaits can admit a newer concurrent value. Recheck at commit and delivery.
@@ -759,6 +793,7 @@ async function handleRequest(request: Request): Promise<Response> {
   const requestId = crypto.randomUUID()
   const mode = request.headers.get('X-Nodex-Read-Mode')
   await hydrateKey(key)
+  await ensureTrustedClock()
   const shared = shareableRequest(request)
   const cached = shared && mode !== 'origin' && mode !== 'peer' && !runtimeFlags.disableCacheRead ? await getCachedEntry(key) : null
   if (cached) {

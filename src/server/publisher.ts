@@ -1,5 +1,5 @@
-import { contentDigest, encodeProof, signProof, PROOF_MAX_AGE_MS, INVALIDATION_PROOF_MAX_AGE_MS,
-  type PublisherIdentity, type PublisherProof } from '../crypto/publisher-proof.js'
+import { contentDigest, encodeProof, signProof, signTime, PROOF_MAX_AGE_MS, INVALIDATION_PROOF_MAX_AGE_MS,
+  type PublisherIdentity, type PublisherProof, type SignedTime } from '../crypto/publisher-proof.js'
 import { SEQUENCE_UUID_PATTERN } from './sequence-authority.js'
 
 // Development processes use an ephemeral key. Production must share a configured
@@ -53,4 +53,10 @@ export async function publishProof(input: {
     iv: input.iv ?? '', encryptionKeyId: input.encryptionKeyId ?? '',
   }, privateKey)
   return encodeProof(proof)
+}
+
+export async function publishTime(nonce: string): Promise<SignedTime> {
+  const { identity, privateKey } = await getPublisher()
+  return signTime({ format: 1, nonce, serverMs: Date.now(), tenant: identity.tenant, epoch: identity.epoch,
+    signingKeyId: identity.keyId }, privateKey)
 }

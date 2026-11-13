@@ -86,3 +86,28 @@ export async function verifyProof(
       bytes(Uint8Array.from(atob(proof.signature), c => c.charCodeAt(0))), bytes(canonical(proof)))
   } catch { return false }
 }
+
+/** Signed server time bound to a client nonce: a cached or replayed response cannot match a fresh nonce. */
+export interface SignedTime {
+  format: 1; nonce: string; serverMs: number; tenant: string; epoch: string; signingKeyId: string; signature: string
+}
+export const TIME_NONCE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/
+function canonicalTime(t: Omit<SignedTime, 'signature'>): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(
+    ['nodex-time-v1', t.nonce, t.serverMs, t.tenant, t.epoch, t.signingKeyId]))
+}
+export async function signTime(t: Omit<SignedTime, 'signature'>, privateKey: CryptoKey): Promise<SignedTime> {
+  const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, bytes(canonicalTime(t)))
+  return { ...t, signature: base64(new Uint8Array(signature)) }
+}
+export async function verifyTime(t: SignedTime, identity: PublisherIdentity, nonce: string): Promise<boolean> {
+  try {
+    if (t.format !== 1 || t.nonce !== nonce || !TIME_NONCE_PATTERN.test(nonce)) return false
+    if (!Number.isSafeInteger(t.serverMs) || t.serverMs <= 0 || typeof t.signature !== 'string' || t.signature.length > 512) return false
+    if (t.tenant !== identity.tenant || t.epoch !== identity.epoch || t.signingKeyId !== identity.keyId) return false
+    if (identity.publicJwk.d || identity.publicJwk.kty !== 'EC' || identity.publicJwk.crv !== 'P-256') return false
+    const key = await crypto.subtle.importKey('jwk', identity.publicJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])
+    return await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key,
+      bytes(Uint8Array.from(atob(t.signature), c => c.charCodeAt(0))), bytes(canonicalTime(t)))
+  } catch { return false }
+}

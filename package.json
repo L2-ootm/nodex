@@ -26,6 +26,7 @@
     "test": "vitest run && playwright test --project=chromium",
     "metrics:export": "tsx scripts/export-metrics.ts",
     "economics:evaluate": "tsx scripts/evaluate-economics.ts",
+    "measure:renewal": "tsx scripts/measure-renewal-cost.ts",
     "keys:generate": "tsx scripts/generate-keys.ts",
     "config:production": "node --env-file-if-exists=.env --import tsx scripts/check-production-config.ts",
     "validate:external": "playwright test tests/phase-07.spec.ts --project=chromium && npm run metrics:export",
