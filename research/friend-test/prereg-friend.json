@@ -1,0 +1,53 @@
+{
+  "id": "nodex-friend-test-v1",
+  "status": "DRAFT: freeze by committing this file and recording `git hash-object prereg-friend.json` plus the date in STEER.md BEFORE the first run that counts. Any later edit makes a new version.",
+  "scope": "Two readers, two networks, one hot key. Can falsify H1 (safety) in the field and establish whether the peer path works across real NATs. Cannot support H2 (efficiency): two readers is far below the simulated audience and the peer-share ceiling with two readers is 50 %.",
+  "design": {
+    "readers": 2,
+    "readIntervalMs": 1000,
+    "durationSecs": 360,
+    "forcedPeerSecs": 60,
+    "writePeriodMs": 20000,
+    "payloadBytes": 48000,
+    "runs": [
+      { "id": "R1", "what": "home network to home network, default ICE (STUN only unless TURN is already configured)", "required": true },
+      { "id": "R2", "what": "friend tethered to a phone hotspot (carrier NAT), default ICE", "required": true },
+      { "id": "R3", "what": "relay forced on both sides with &relay=1; only if TURN is configured on the deployment", "required": false }
+    ],
+    "repeat": "Each required run twice. A hypothesis passes only if both repeats pass."
+  },
+  "bound": { "deltaMs": 5000, "epsilonMs": 1000, "guardMs": 50 },
+  "validity": {
+    "note": "A run that breaks any of these is VOID (repeat it), not a fail. A safety violation found in a void run is still reported.",
+    "maxClockUncertaintyMs": 250,
+    "maxClockDriftMs": 200,
+    "minAckedWrites": 10,
+    "minReadsPerReader": 250,
+    "minOverlapSecs": 240,
+    "maxHiddenReadShare": 0.05
+  },
+  "hypotheses": {
+    "S1": { "class": "safety", "text": "No admitted read is staler than delta + epsilon.", "rule": "For every 200 read of version v started at publisher time T: T - ack(v_next) <= 6000 + reader clock uncertainty + writer clock uncertainty + guard, where v_next is the lowest acknowledged version above v.", "max": 0 },
+    "S2": { "class": "safety", "text": "No reader observes a version lower than one it already observed.", "max": 0 },
+    "S3": { "class": "availability", "text": "Fail-closed must not mean unusable: failed reads (non-200) stay rare.", "maxFailedShare": 0.02 },
+    "F1": { "class": "feasibility", "text": "A DataChannel opens between the two networks.", "maxConnectSecs": 45, "relayCounts": "PASS-RELAY: reported separately because relayed bytes are billed bytes" },
+    "F2": { "class": "feasibility", "text": "A peer-only read is answered by the peer inside the worker's peer deadline.", "minForcedPeerSuccess": 0.66, "minTrials": 8 },
+    "F3": { "class": "feasibility", "text": "Organic reads move payload bytes over the peer path.", "minPeerPayloadByteShare": 0.15, "ceilingWithTwoReaders": 0.5 },
+    "F4": { "class": "feasibility", "text": "Renewal proofs arrive from the peer, not only from origin.", "maxFirstPeerProofSecs": 30, "minPeerProofShare": 0.3, "needs": "X-Nodex-Renewal header (preferred) or the Service Worker request log from owner-observe.mjs; otherwise NOT MEASURED" },
+    "F5": { "class": "feasibility", "text": "Latency stays usable on a real WAN.", "maxOrganicP95Ms": 250, "maxPayloadReadP95Ms": 800 }
+  },
+  "predictions": {
+    "note": "Written before any run, so the result can surprise.",
+    "S1_S2": "Pass. If S1 fails, suspect the /api/time fallback anchoring before suspecting peers.",
+    "F1": "R1 connects as srflx. R2 fails to connect without TURN (carrier NAT is usually symmetric).",
+    "F2": "Fails or is marginal on R1 when peer RTT exceeds about 50 ms: a 48 kB payload over a fresh SCTP channel needs several round trips and the complete deadline is 200 ms (OPERATIONS.md:43).",
+    "F3": "Below 0.15: both readers notice a new version in the same second and both go to origin.",
+    "F4": "Passes if F1 passes: a proof is under 1 kB and one round trip."
+  },
+  "decision": {
+    "S fail": "H1 is falsified in the field. Stop all positioning work; fix and re-run.",
+    "S pass, F1 fail on R1": "The peer transport is not field-viable between ordinary home networks. Ship the guard and the detached proof over the CDN only.",
+    "S pass, F1 pass, F2 or F3 fail": "Peers connect but do not carry bytes under the current deadline and trigger logic. Keep peers behind a flag; measure the deadline before any byte claim.",
+    "all pass": "Proceed to the simulator arms in STEER.md section 5, then a 10 to 20 reader run. Two readers still prove nothing about cost."
+  }
+}

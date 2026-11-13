@@ -1,0 +1,19 @@
+payload                    plain  CDN brotli  CDN gzip  Nodex wire  vs CDN  break-even  billed   Nodex if   billed
+                               B           B         B     shipped           peer share  ratio*   gz+AES B   ratio*
+catalog 1 KiB              1,113       754       801     2,654    3.52x      72 %     1.11     1,702     0.71
+numbers 1 KiB              1,052       946       949     2,570    2.72x      63 %     0.86     1,902     0.63
+catalog 8 KiB              8,315     1,760     1,906    12,254    6.96x      86 %     2.20     3,178     0.57
+numbers 8 KiB              8,225     4,451     4,372    12,134    2.73x      63 %     0.86     6,466     0.46
+catalog 32 KiB            32,911     4,886     5,260    45,050    9.22x      89 %     2.91     7,650     0.49
+numbers 32 KiB            32,784    16,579    16,553    44,882    2.71x      63 %     0.85    22,706     0.43
+catalog 60 KiB            61,630     8,635     9,134    83,342    9.65x      90 %     3.05    12,814     0.47
+numbers 60 KiB            61,449    30,516    30,448    83,102    2.72x      63 %     0.86    41,234     0.43
+catalog 256 KiB          262,193    34,241    35,570   350,758   10.24x      90 %     3.23    48,062     0.44
+numbers 256 KiB          262,175   129,385   126,396   350,734    2.71x      63 %     0.86   169,162     0.41
+catalog 1024 KiB       1,048,712   133,987   139,203 1,399,450   10.44x      90 %     3.30   186,238     0.44
+numbers 1024 KiB       1,048,585   498,895   502,417 1,399,282    2.80x      64 %     0.89   670,526     0.42
+
+* billed ratio = Nodex billed payload bytes / compressing-CDN billed payload bytes, granting the simulator's 68 % peer share.
+  Above 1.00 Nodex bills MORE than the CDN. The preregistered H2 threshold is 0.40 against an uncompressed baseline.
+  "break-even peer share": peers must carry at least this share of payload deliveries for Nodex to tie the CDN.
+  Proof renewals (839 B each) and signaling are extra on the Nodex side and are not counted here.

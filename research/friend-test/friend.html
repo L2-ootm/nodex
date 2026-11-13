@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Nodex field test</title>
+<style>
+  :root {
+    --bg: #0a0c0f; --panel: #11151a; --line: #222a33; --text: #e6ebf0; --dim: #8894a3;
+    --cache: #4b5a6b; --peer: #3ddc97; --origin: #5aa9ff; --bad: #ff5d5d; --warn: #f2b84b;
+    --ease: cubic-bezier(.2, .8, .2, 1);
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, "Segoe UI", Roboto, sans-serif;
+    background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 48px 48px; background-position: -1px -1px; background-attachment: fixed; }
+  body::before { content: ""; position: fixed; inset: 0; background: radial-gradient(ellipse at 50% 0, transparent 0, var(--bg) 70%); pointer-events: none; }
+  main { position: relative; max-width: 720px; margin: 0 auto; padding: 28px 20px 64px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+  .pill { font: 600 11px/1 ui-monospace, Consolas, monospace; text-transform: uppercase; letter-spacing: .08em; padding: 5px 8px;
+    border: 1px solid var(--line); border-radius: 999px; color: var(--dim); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  p.lede { color: var(--dim); margin: 8px 0 20px; max-width: 60ch; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 14px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em; color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+
+  /* Path: Origin -- You -- Peer. The links carry the state; a dot travels on each network read. */
+  .path { display: grid; grid-template-columns: auto 1fr auto 1fr auto; align-items: center; gap: 0; }
+  .node { display: grid; justify-items: center; gap: 6px; min-width: 64px; }
+  .node i { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--line); background: var(--bg); display: block;
+    transition: border-color .3s var(--ease), box-shadow .3s var(--ease); }
+  .node b { font-size: 12px; font-weight: 600; }
+  .node small { font: 11px ui-monospace, Consolas, monospace; color: var(--dim); min-height: 16px; }
+  .node.you i { border-color: var(--text); }
+  .node.origin.on i { border-color: var(--origin); }
+  .node.peer.on i { border-color: var(--peer); box-shadow: 0 0 0 4px rgb(61 220 151 / .12); }
+  .node.peer.relay i { border-color: var(--warn); box-shadow: 0 0 0 4px rgb(242 184 75 / .12); }
+  .node.peer.fail i { border-color: var(--bad); }
+  .link { position: relative; height: 2px; margin: 0 6px 22px; background: var(--line); overflow: visible; }
+  .link.searching { background: repeating-linear-gradient(90deg, var(--dim) 0 6px, transparent 6px 12px); background-size: 12px 2px;
+    animation: march 1.2s linear infinite; }
+  .link.direct { background: var(--peer); } .link.relay { background: var(--warn); } .link.fail { background: var(--bad); opacity: .5; }
+  .link.o { background: var(--origin); opacity: .55; }
+  .link .dot { position: absolute; top: -3px; width: 8px; height: 8px; border-radius: 50%; opacity: 0; pointer-events: none; }
+  .link.p .dot { right: 0; background: var(--peer); } .link.o .dot { left: 0; background: var(--origin); }
+  @keyframes march { to { background-position: 12px 0; } }
+
+  ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  ol.steps li { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: baseline; color: var(--dim); }
+  ol.steps li::before { content: ""; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line); justify-self: center; align-self: center;
+    transition: background-color .25s var(--ease), border-color .25s var(--ease); }
+  ol.steps li.active { color: var(--text); } ol.steps li.active::before { border-color: var(--text); animation: breathe 1.6s ease-in-out infinite; }
+  ol.steps li.done { color: var(--text); } ol.steps li.done::before { background: var(--peer); border-color: var(--peer); }
+  ol.steps li.warn::before { background: var(--warn); border-color: var(--warn); }
+  ol.steps li.fail::before { background: var(--bad); border-color: var(--bad); }
+  ol.steps li span.v { font: 12px ui-monospace, Consolas, monospace; color: var(--dim); text-align: right; }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 5px rgb(230 235 240 / .1); } }
+
+  .bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin: 14px 0 0; }
+  .bar > div { height: 100%; width: 0; background: var(--text); transition: width .9s linear; }
+
+  /* Tape: one tick per read, coloured by where the bytes came from. */
+  .tape { display: flex; flex-wrap: wrap; gap: 2px; min-height: 18px; }
+  .tape s { width: 4px; height: 16px; border-radius: 1px; background: var(--cache); transform-origin: bottom; animation: rise .18s var(--ease); text-decoration: none; }
+  .tape s.peer-fetch { background: var(--peer); } .tape s.server-fallback { background: var(--origin); }
+  .tape s.error, .tape s.none { background: var(--bad); } .tape s.forced { outline: 1px solid var(--text); outline-offset: 0; }
+  .tape s.rollback { background: var(--bad); height: 22px; }
+  @keyframes rise { from { transform: scaleY(.2); opacity: .3; } }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--dim); }
+  .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; background: var(--c); }
+
+  dl.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 12px; margin: 14px 0 0; }
+  dl.stats div { border-top: 1px solid var(--line); padding-top: 8px; }
+  dl.stats dt { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; }
+  dl.stats dd { margin: 2px 0 0; font: 600 20px/1.2 ui-monospace, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  dd.bad { color: var(--bad); }
+
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+  button { font: 600 14px system-ui, sans-serif; padding: 11px 18px; border-radius: 9px; border: 1px solid var(--text); background: var(--text); color: var(--bg);
+    cursor: pointer; transition: transform .12s var(--ease), opacity .2s; }
+  button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+  button:active { transform: scale(.97); } button[disabled] { opacity: .35; cursor: not-allowed; }
+  :focus-visible { outline: 2px solid var(--origin); outline-offset: 3px; }
+  .alert { border: 1px solid var(--bad); background: rgb(255 93 93 / .08); border-radius: 10px; padding: 12px 14px; margin-top: 14px; overflow-wrap: anywhere; }
+  .alert.warn { border-color: var(--warn); background: rgb(242 184 75 / .08); }
+  .alert[hidden] { display: none; }
+  details { margin-top: 14px; color: var(--dim); font-size: 13px; } details summary { cursor: pointer; color: var(--text); }
+  details ul { padding-left: 18px; margin: 8px 0 0; } details li { margin: 4px 0; }
+  iframe.runtime { position: absolute; width: 1px; height: 1px; border: 0; opacity: 0; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .link.searching { background-position: 0 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 data-t="title">Nodex field test</h1>
+    <span class="pill" id="pill">-</span>
+  </header>
+  <p class="lede" data-t="lede">Two laptops on two networks read the same public data for six minutes. This page measures whether they can share it directly and whether anything shown was ever out of date.</p>
+
+  <div class="alert" id="alert" role="alert" hidden></div>
+  <div class="alert warn" id="hiddenWarn" role="status" hidden data-t="hiddenWarn">This tab was in the background. Browsers slow hidden tabs, so some reads were skipped. Keep it visible until the test ends.</div>
+
+  <section aria-labelledby="h-path">
+    <h2 id="h-path" data-t="hPath">Path</h2>
+    <div class="path" aria-hidden="true">
+      <div class="node origin" id="nOrigin"><i></i><b data-t="origin">Origin</b><small id="originNote"></small></div>
+      <div class="link o" id="lOrigin"><span class="dot"></span></div>
+      <div class="node you"><i></i><b data-t="you">You</b><small id="youNote"></small></div>
+      <div class="link p" id="lPeer"><span class="dot"></span></div>
+      <div class="node peer" id="nPeer"><i></i><b data-t="peer">Other laptop</b><small id="peerNote"></small></div>
+    </div>
+    <p id="pathText" aria-live="polite" style="margin:6px 0 0;color:var(--dim);font-size:13px"></p>
+  </section>
+
+  <section aria-labelledby="h-steps">
+    <h2 id="h-steps" data-t="hSteps">Steps</h2>
+    <ol class="steps">
+      <li id="sClock"><span data-t="sClock">Match clocks with the publisher</span><span class="v" id="vClock"></span></li>
+      <li id="sMesh"><span data-t="sMesh">Find the other laptop</span><span class="v" id="vMesh"></span></li>
+      <li id="sReads"><span data-t="sReads">Read once a second</span><span class="v" id="vReads"></span></li>
+      <li id="sSave"><span data-t="sSave">Save the result file and send it</span><span class="v" id="vSave"></span></li>
+    </ol>
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar" aria-label="Progress"><div id="barFill"></div></div>
+    <div class="actions">
+      <button id="start" disabled data-t="start">Start</button>
+      <button id="save" class="ghost" disabled data-t="save">Download result</button>
+      <button id="copy" class="ghost" disabled data-t="copy">Copy result</button>
+    </div>
+  </section>
+
+  <section aria-labelledby="h-tape">
+    <h2 id="h-tape" data-t="hTape">Reads</h2>
+    <div class="tape" id="tape" aria-hidden="true"></div>
+    <div class="legend">
+      <span style="--c:var(--cache)" data-t="lCache">already held</span>
+      <span style="--c:var(--peer)" data-t="lPeer">from the other laptop</span>
+      <span style="--c:var(--origin)" data-t="lOrigin">from the origin</span>
+      <span style="--c:var(--bad)" data-t="lErr">failed</span>
+    </div>
+    <dl class="stats">
+      <div><dt data-t="dReads">Reads</dt><dd id="cReads">0</dd></div>
+      <div><dt data-t="dPeer">From peer</dt><dd id="cPeer">0</dd></div>
+      <div><dt data-t="dOrigin">From origin</dt><dd id="cOrigin">0</dd></div>
+      <div><dt data-t="dErr">Failed</dt><dd id="cErr">0</dd></div>
+      <div><dt data-t="dVer">Version</dt><dd id="cVer">-</dd></div>
+      <div><dt data-t="dRoll">Went backwards</dt><dd id="cRoll">0</dd></div>
+    </dl>
+  </section>
+
+  <details>
+    <summary data-t="privT">What this test shares</summary>
+    <ul>
+      <li data-t="priv1">The two browsers connect directly, so each side and the connection servers can see the other's public IP address, as in any video call. The result file does not contain IP addresses.</li>
+      <li data-t="priv2">The result file holds timings, version numbers, where each read came from, the connection type (direct or relayed), and your browser name and major version. Nothing else from this device.</li>
+      <li data-t="priv3">The file stays on this laptop until you send it. The data being read is public test data.</li>
+      <li data-t="priv4">Expected upload during the test: a few megabytes at most. Close the tab to stop at any time.</li>
+    </ul>
+  </details>
+</main>
+
+<script src="probe.js"></script>
+<script>
+(() => {
+  'use strict'
+  const PT = { title: 'Teste de campo Nodex',
+    lede: 'Dois notebooks em duas redes leem os mesmos dados publicos por seis minutos. Esta pagina mede se eles conseguem compartilhar direto e se algo exibido esteve desatualizado.',
+    hiddenWarn: 'Esta aba ficou em segundo plano. O navegador desacelera abas ocultas e algumas leituras foram puladas. Mantenha a aba visivel ate o fim.',
+    hPath: 'Caminho', origin: 'Origem', you: 'Voce', peer: 'Outro notebook', hSteps: 'Etapas', sClock: 'Acertar o relogio com o publicador',
+    sMesh: 'Encontrar o outro notebook', sReads: 'Ler uma vez por segundo', sSave: 'Salvar o arquivo de resultado e enviar', start: 'Iniciar',
+    save: 'Baixar resultado', copy: 'Copiar resultado', hTape: 'Leituras', lCache: 'ja em maos', lPeer: 'do outro notebook', lOrigin: 'da origem', lErr: 'falhou',
+    dReads: 'Leituras', dPeer: 'Do par', dOrigin: 'Da origem', dErr: 'Falhas', dVer: 'Versao', dRoll: 'Voltou atras', privT: 'O que este teste compartilha',
+    priv1: 'Os dois navegadores se conectam direto, entao cada lado e os servidores de conexao veem o IP publico do outro, como em uma videochamada. O arquivo de resultado nao contem enderecos IP.',
+    priv2: 'O arquivo guarda tempos, numeros de versao, de onde veio cada leitura, o tipo de conexao (direta ou via rele) e o nome e a versao principal do navegador. Nada mais deste aparelho.',
+    priv3: 'O arquivo fica neste notebook ate voce enviar. Os dados lidos sao dados publicos de teste.',
+    priv4: 'Upload esperado durante o teste: poucos megabytes no maximo. Feche a aba para parar a qualquer momento.' }
+  const MSG = {
+    en: { ready: 'Ready. Press Start at the same moment as the other person.', searching: 'Looking for the other laptop', direct: 'Connected directly',
+      relay: 'Connected through a relay server', nopeer: 'No direct connection yet. The test continues and records that.', left: 's left',
+      done: 'Done. Download the result and send the file.', copied: 'Copied', noRoom: 'This link is incomplete: it has no room. Ask for the link again.',
+      noToken: 'This link is incomplete: it has no invitation. Ask for the link again.', insecure: 'This page must be opened over https.',
+      noRtc: 'This browser cannot make direct connections (WebRTC is off). Use a current Chrome, Edge or Firefox without a WebRTC-blocking extension.',
+      noSw: 'The page worker did not take control. Reload once. If this repeats, private browsing or a blocked Service Worker is the likely cause.',
+      loading: 'Loading the runtime', rollback: 'A read returned an older version than one already shown. That is a failure of the claim under test; please send the file.' },
+    pt: { ready: 'Pronto. Aperte Iniciar no mesmo instante que a outra pessoa.', searching: 'Procurando o outro notebook', direct: 'Conectado direto',
+      relay: 'Conectado por um servidor rele', nopeer: 'Sem conexao direta ainda. O teste continua e registra isso.', left: 's restantes',
+      done: 'Concluido. Baixe o resultado e envie o arquivo.', copied: 'Copiado', noRoom: 'Link incompleto: falta a sala. Peca o link de novo.',
+      noToken: 'Link incompleto: falta o convite. Peca o link de novo.', insecure: 'Esta pagina precisa ser aberta por https.',
+      noRtc: 'Este navegador nao faz conexoes diretas (WebRTC desligado). Use Chrome, Edge ou Firefox atual, sem extensao que bloqueie WebRTC.',
+      noSw: 'O worker da pagina nao assumiu o controle. Recarregue uma vez. Se repetir, a causa provavel e navegacao privada ou Service Worker bloqueado.',
+      loading: 'Carregando o runtime', rollback: 'Uma leitura devolveu uma versao mais antiga que outra ja exibida. Isso e uma falha da hipotese em teste; envie o arquivo.' },
+  }
+  const pt = /^pt/i.test(navigator.language || '')
+  const m = pt ? MSG.pt : MSG.en
+  if (pt) { document.documentElement.lang = 'pt-BR'; for (const el of document.querySelectorAll('[data-t]')) if (PT[el.dataset.t]) el.textContent = PT[el.dataset.t] }
+
+  const $ = id => document.getElementById(id)
+  const params = new URLSearchParams(location.search)
+  const hash = new URLSearchParams(location.hash.slice(1))
+  const room = (params.get('room') || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 48)
+  const role = params.get('role') === 'B' ? 'B' : 'A'
+  const key = '/api/products/' + (params.get('key') || 'friend-' + room).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64)
+  const secs = Math.max(10, Math.min(1800, Number(params.get('secs')) || 360))
+  const mock = params.get('sw') === 'skip'
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches
+  const token = hash.get('nodexBetaToken') || ''
+  $('pill').textContent = (room || '-') + ' / ' + role
+
+  const fail = text => { const box = $('alert'); box.textContent = text; box.hidden = false }
+  const step = (id, state, value) => { $(id).className = state; if (value !== undefined) $('v' + id.slice(1)).textContent = value }
+  let result = null, runtime = null
+
+  function pulse(link, fromRight) { // one dot per network read: 420 ms, decelerating into "You"
+    if (reduce) return
+    const dot = link.querySelector('.dot'), width = link.clientWidth
+    dot.animate([{ transform: 'translateX(0)', opacity: 1 }, { transform: `translateX(${fromRight ? -width : width}px)`, opacity: 1, offset: .85 },
+      { transform: `translateX(${fromRight ? -width : width}px)`, opacity: 0 }], { duration: 420, easing: 'cubic-bezier(.2,.8,.2,1)' })
+  }
+  function showMesh(mesh) {
+    const samples = (mesh.telemetry || []).filter(sample => sample.state === 'connected' || sample.channel === 'open')
+    const type = samples.length ? samples[samples.length - 1].type : null
+    const link = $('lPeer'), node = $('nPeer')
+    if (mesh.connectedMs === null) {
+      link.className = 'link p fail'; node.className = 'node peer fail'; $('peerNote').textContent = '-'
+      $('pathText').textContent = m.nopeer; step('sMesh', 'warn', '-'); return
+    }
+    const relay = type === 'relay'
+    link.className = 'link p ' + (relay ? 'relay' : 'direct'); node.className = 'node peer ' + (relay ? 'relay' : 'on')
+    $('peerNote').textContent = (type || 'unknown') + (samples.length && samples[samples.length - 1].rttMs !== undefined ? ' ' + Math.round(samples[samples.length - 1].rttMs) + ' ms' : '')
+    $('pathText').textContent = relay ? m.relay : m.direct
+    step('sMesh', relay ? 'warn' : 'done', (mesh.connectedMs / 1000).toFixed(1) + ' s')
+  }
+  const counts = { reads: 0, peer: 0, origin: 0, err: 0, roll: 0 }
+  function showRead(read) {
+    counts.reads++
+    const tick = document.createElement('s')
+    tick.className = read.source + (read.forced ? ' forced' : '') + (read.rollback ? ' rollback' : '')
+    $('tape').appendChild(tick)
+    if (read.status !== 200) counts.err++
+    else if (read.source === 'peer-fetch') { counts.peer++; pulse($('lPeer'), true) }
+    else if (read.source === 'server-fallback') { counts.origin++; pulse($('lOrigin'), false); $('nOrigin').classList.add('on') }
+    if (read.rollback) { counts.roll++; $('cRoll').className = 'bad'; fail(m.rollback) }
+    $('cReads').textContent = counts.reads; $('cPeer').textContent = counts.peer; $('cOrigin').textContent = counts.origin
+    $('cErr').textContent = counts.err; $('cRoll').textContent = counts.roll
+    if (read.seq) $('cVer').textContent = read.seq
+    const done = Math.min(100, Math.round((read.i + 1) / secs * 100))
+    $('barFill').style.width = done + '%'; $('bar').setAttribute('aria-valuenow', String(done))
+    $('vReads').textContent = Math.max(0, secs - read.i - 1) + m.left
+    if (read.i === 0 && read.source === 'none' && !mock) fail(m.noSw)
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden && result === null && runtime) $('hiddenWarn').hidden = false })
+
+  // Preflight
+  if (!room) return fail(m.noRoom)
+  if (!token && !mock) return fail(m.noToken)
+  if (!isSecureContext) return fail(m.insecure)
+  if (typeof RTCPeerConnection !== 'function') return fail(m.noRtc)
+
+  // The protocol runtime lives in /metrics.html, embedded exactly as the beta suite's /run does
+  // (apps/beta-suite/README.md:61). Parameters mirror tests/beta-real.spec.ts:53-57.
+  const frame = document.createElement('iframe')
+  frame.className = 'runtime'; frame.setAttribute('aria-hidden', 'true'); frame.tabIndex = -1; frame.title = 'runtime'
+  const src = new URL('/metrics.html', location.origin)
+  src.searchParams.set('nodexRoom', room)
+  src.searchParams.set('nodexTopology', params.get('topology') || 'wan-nat')
+  const api = params.get('api')
+  if (api) { src.searchParams.set('nodexApiOrigin', api); src.searchParams.set('nodexSignalingUrl', api.replace(/\/$/, '') + '/api/signal') }
+  if (params.get('relay') === '1') src.searchParams.set('nodexForceRelay', '1')
+  src.hash = 'nodexBetaToken=' + encodeURIComponent(token)
+  frame.src = src.toString()
+  $('pathText').textContent = m.loading
+  document.body.appendChild(frame)
+
+  ;(async () => {
+    await new Promise(resolve => frame.addEventListener('load', resolve, { once: true })) // also lets the button handlers below attach first
+    // First visit: the worker claims this page after activation (sw.ts:361). Wait for control, reload once if needed.
+    if (!mock && 'serviceWorker' in navigator) {
+      const until = performance.now() + 12000
+      while (!navigator.serviceWorker.controller && performance.now() < until) await new Promise(resolve => setTimeout(resolve, 250))
+      if (!navigator.serviceWorker.controller) {
+        if (!sessionStorage.getItem('steer-reloaded')) { sessionStorage.setItem('steer-reloaded', '1'); return location.reload() }
+        return fail(m.noSw)
+      }
+    }
+    runtime = frame.contentWindow
+    $('start').disabled = false; $('start').focus()
+    $('pathText').textContent = m.ready
+    if (params.get('auto') === '1') $('start').click()
+  })()
+
+  $('start').addEventListener('click', async () => {
+    $('start').disabled = true
+    let lock = null
+    try { lock = await navigator.wakeLock?.request('screen') } catch { /* optional */ }
+    result = null
+    const done = await SteerProbe.run({ role, room, key, secs, forcedSecs: Math.min(60, Math.floor(secs / 4)), rt: runtime, tailSecs: mock ? 0 : 180,
+      onEvent(name, data) {
+        if (name === 'phase' && data.phase === 'clock') step('sClock', 'active')
+        if (name === 'clock') step('sClock', data.ok && data.uncertaintyMs <= 250 ? 'done' : 'warn', data.ok ? '±' + data.uncertaintyMs + ' ms' : '-')
+        if (name === 'phase' && data.phase === 'mesh') { step('sMesh', 'active'); $('lPeer').className = 'link p searching'; $('pathText').textContent = m.searching }
+        if (name === 'mesh-wait') $('vMesh').textContent = Math.round(data.elapsedMs / 1000) + ' s'
+        if (name === 'mesh') showMesh(data)
+        if (name === 'phase' && data.phase === 'reads') step('sReads', 'active')
+        if (name === 'read') showRead(data)
+        if (name === 'phase' && data.phase === 'finish') step('sReads', counts.roll ? 'fail' : 'done', counts.reads + '')
+      } })
+    result = done
+    window.__steerResult = done // read by owner-observe.mjs
+    try { localStorage.setItem('steer-last-result', JSON.stringify(done)) } catch { /* storage may be full or blocked */ }
+    try { await lock?.release() } catch { /* optional */ }
+    step('sSave', 'active'); $('pathText').textContent = m.done
+    $('save').disabled = false; $('copy').disabled = false; $('save').focus()
+  })
+  $('save').addEventListener('click', () => { SteerProbe.download(result); step('sSave', 'done') })
+  $('copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(JSON.stringify(result)); $('vSave').textContent = m.copied; step('sSave', 'done') } catch { SteerProbe.download(result) }
+  })
+})()
+</script>
+</body>
+</html>
