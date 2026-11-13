@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { app, seqCounters, sessionKeyBytes } from './mock-api.js'
 import { buildPayloadAad } from '../crypto/crypto.js'
+import { decodeProof, verifyProof, PROOF_HEADER, type PublisherIdentity } from '../crypto/publisher-proof.js'
 
 describe('mock-api', () => {
   beforeEach(() => {
@@ -147,14 +148,31 @@ describe('mock-api', () => {
     expect(body.seededNodeIds.length).toBe(0)
   })
 
-  it('Test 14: two consecutive GET /api/products/1 calls produce different X-Nodex-Iv values (fresh IV per request)', async () => {
+  it('Test 14: consecutive GETs at one version return byte-identical ciphertext and IV; a new version changes the IV', async () => {
     const res1 = await app.request('/api/products/1')
     const res2 = await app.request('/api/products/1')
-    const iv1 = res1.headers.get('X-Nodex-Iv')
-    const iv2 = res2.headers.get('X-Nodex-Iv')
-    expect(iv1).not.toBeNull()
-    expect(iv2).not.toBeNull()
-    expect(iv1).not.toBe(iv2)
+    expect(res1.headers.get('X-Nodex-Iv')).not.toBeNull()
+    expect(res2.headers.get('X-Nodex-Iv')).toBe(res1.headers.get('X-Nodex-Iv'))
+    expect(await res2.text()).toBe(await res1.text())
+    seqCounters.set('/api/products/1', 2)
+    const res3 = await app.request('/api/products/1')
+    expect(res3.headers.get('X-Nodex-Iv')).not.toBe(res1.headers.get('X-Nodex-Iv'))
+  })
+
+  it('proof route renews freshness for the same ciphertext digest, version and IV', async () => {
+    const identity = await (await app.request('/api/publisher-key')).json() as PublisherIdentity
+    const get = await app.request('/api/products/7')
+    const ct = await get.text()
+    const held = decodeProof(get.headers.get(PROOF_HEADER))!
+    await new Promise(r => setTimeout(r, 5))
+    const renewal = await app.request('/api/products/7/proof')
+    expect(renewal.status).toBe(204)
+    const fresh = decodeProof(renewal.headers.get(PROOF_HEADER))!
+    expect(fresh.digest).toBe(held.digest)
+    expect(fresh.iv).toBe(held.iv)
+    expect(fresh.version).toBe(held.version)
+    expect(fresh.validatedAt).toBeGreaterThan(held.validatedAt)
+    expect(await verifyProof(fresh, identity, '/api/products/7', 'content', ct, fresh.validatedAt)).toBe(true)
   })
 
   it('Test 15: ciphertext from /api/products/1 decrypts to valid product JSON using session key', async () => {
@@ -172,10 +190,9 @@ describe('mock-api', () => {
     const prodRes = await app.request('/api/products/42')
     const ct = await prodRes.text()
     const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
-    const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
 
     const plaintext = await globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, prodRes.headers.get('X-Nodex-Key-Id')!, validatedAt) },
+      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, prodRes.headers.get('X-Nodex-Key-Id')!) },
       cryptoKey,
       Buffer.from(ct, 'base64')
     )
@@ -199,30 +216,25 @@ describe('mock-api', () => {
     const prodRes = await app.request('/api/products/42')
     const ct = await prodRes.text()
     const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
-    const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
 
     await expect(
       globalThis.crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, prodRes.headers.get('X-Nodex-Key-Id')!, validatedAt) },
+        { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 999, prodRes.headers.get('X-Nodex-Key-Id')!) },
         cryptoKey,
         Buffer.from(ct, 'base64')
       )
     ).rejects.toBeInstanceOf(DOMException)
   })
 
-  it('ciphertext rejects a forged X-Nodex-Validated-At value', async () => {
-    const keyRes = await app.request('/api/session-key')
-    const { keyBytes } = await keyRes.json() as { keyBytes: string }
-    const cryptoKey = await globalThis.crypto.subtle.importKey('raw', Buffer.from(keyBytes, 'base64'), { name: 'AES-GCM' }, false, ['decrypt'])
+  it('a forged validatedAt invalidates the publisher signature', async () => {
+    const identity = await (await app.request('/api/publisher-key')).json() as PublisherIdentity
     const prodRes = await app.request('/api/products/42')
     const ct = await prodRes.text()
-    const iv = Buffer.from(prodRes.headers.get('X-Nodex-Iv')!, 'base64')
-    const validatedAt = Number(prodRes.headers.get('X-Nodex-Validated-At'))
-    await expect(globalThis.crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv, additionalData: buildPayloadAad('/api/products/42', 1, prodRes.headers.get('X-Nodex-Key-Id')!, validatedAt + 1) },
-      cryptoKey,
-      Buffer.from(ct, 'base64')
-    )).rejects.toBeInstanceOf(DOMException)
+    const proof = decodeProof(prodRes.headers.get(PROOF_HEADER))!
+    expect(proof.validatedAt).toBe(Number(prodRes.headers.get('X-Nodex-Validated-At')))
+    expect(await verifyProof(proof, identity, '/api/products/42', 'content', ct, proof.validatedAt)).toBe(true)
+    expect(await verifyProof({ ...proof, validatedAt: proof.validatedAt + 1, validUntil: proof.validUntil + 1 },
+      identity, '/api/products/42', 'content', ct, proof.validatedAt)).toBe(false)
   })
 })
 

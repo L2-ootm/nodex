@@ -48,18 +48,19 @@ describe('encrypt / decrypt round-trip', () => {
   it('decrypt rejects when authenticated metadata changes', async () => {
     const key = await importKey(randomKeyBytes())
     const plaintext = encode('freshness-bound')
-    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default', 1000))
+    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default'))
 
     await expect(
-      decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 2, 'default', 1000))
+      decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 2, 'default'))
     ).rejects.toBeInstanceOf(DOMException)
   })
 
-  it('decrypt rejects when the freshness timestamp is forged', async () => {
+  it('AAD is v3 and carries no time, so freshness is the signed proof, not the ciphertext', async () => {
+    expect(new TextDecoder().decode(buildPayloadAad('/api/products/1', 1, 'default')))
+      .toBe('nodex:v3|/api/products/1|1|default')
     const key = await importKey(randomKeyBytes())
-    const plaintext = encode('timestamp-bound')
-    const { ciphertext, iv } = await encrypt(plaintext, key, buildPayloadAad('/api/products/1', 1, 'default', 1000))
-    await expect(decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 1, 'default', 2000)))
+    const { ciphertext, iv } = await encrypt(encode('time-free'), key, buildPayloadAad('/api/products/1', 1, 'default'))
+    await expect(decrypt(ciphertext, iv, key, buildPayloadAad('/api/products/1', 1, 'other')))
       .rejects.toBeInstanceOf(DOMException)
   })
 

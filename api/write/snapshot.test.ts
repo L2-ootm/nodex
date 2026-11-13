@@ -30,7 +30,7 @@ describe('write/read snapshot journey', () => {
     expect(await verifyProof(proof, (await getPublisher()).identity, key, 'content', body)).toBe(true)
     const aes = await crypto.subtle.importKey('raw', Buffer.from('ab'.repeat(32), 'hex'), 'AES-GCM', false, ['decrypt'])
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: Buffer.from(proof.iv, 'base64'),
-      additionalData: Uint8Array.from(buildPayloadAad(key, proof.version, proof.encryptionKeyId, proof.validatedAt)).buffer },
+      additionalData: Uint8Array.from(buildPayloadAad(key, proof.version, proof.encryptionKeyId)).buffer },
       aes, Buffer.from(body, 'base64'))
     expect(JSON.parse(new TextDecoder().decode(plain))).toEqual(command.data)
     const conflict = await writer.request('/api/write' + key, { method: 'POST', headers: {

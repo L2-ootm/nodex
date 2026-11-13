@@ -4,13 +4,14 @@
 //         POST /api/gossip-seed, POST /api/invalidate/:path, GET /api/__test__/seq/:path
 // CORS: allows localhost:4173 (Playwright preview) and localhost:5173 (dev) for CORS-safe SW fetch()
 
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
 import { serve } from '@hono/node-server'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { DEFAULT_SIGNALING_ROOM } from '../shared/config.js'
 import { sessionKeyId } from './session-key.js'
-import { buildPayloadAad } from '../crypto/crypto.js'
+import { snapshotEnvelope, renewalHeaders } from './snapshot-envelope.js'
+import { canonicalSnapshot } from './sequence-authority.js'
 import { getPublisher, publishProof } from './publisher.js'
 import { PROOF_HEADER } from '../crypto/publisher-proof.js'
 import { getPeers } from './signaling-server.js'
@@ -89,18 +90,17 @@ app.get('/api/publisher-key', async c => {
 
 // GET /api/products/:id — AES-GCM-256 encrypted product payload (CRPT-01)
 // Body: base64 ciphertext. Headers: X-Nodex-Iv (base64, 12 bytes), X-Nodex-Key-Id, X-Nodex-Seq
-// Fresh IV per call via getRandomValues — mitigates IV-reuse (T-03-03)
+// The IV is deterministic per (resource, version, plaintext) under an HKDF subkey, so the proof
+// route below can renew freshness for ciphertext a reader already holds (see snapshot-seal.ts).
 // Auth: requires Authorization: Bearer <token> when NODEX_BETA_ENFORCE_AUTH=true (NX-07)
-app.get('/api/products/:id', async (c) => {
+async function resolveProduct(c: Context) {
   if (betaAuthEnforced()) {
-    const authHeader = c.req.header('Authorization') ?? ''
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : undefined
     if (!await validateBetaToken(c.req.raw, 'tester')) {
-      return c.json({ error: 'Unauthorized' }, 401)
+      return { response: c.json({ error: 'Unauthorized' }, 401) }
     }
   }
 
-  const id = c.req.param('id')
+  const id = c.req.param('id') as string
   const path = `/api/products/${id}`
   if (!seqCounters.has(path)) {
     snapshots.delete(path)
@@ -117,40 +117,44 @@ app.get('/api/products/:id', async (c) => {
     ? injectedSeq
     : currentSeq
   const updatedAt = seqUpdatedAt.get(path) ?? Date.now()
-  const validatedAt = Date.now()
 
   await cryptoReady
 
-  const jsonBody = JSON.stringify(snapshots.get(path) ?? { id, name: `Product ${id}`, price: 9.99 })
-  const contentHash = createHash('sha256').update(jsonBody).digest('hex')
-  const iv = globalThis.crypto.getRandomValues(new Uint8Array(12))
-  const ciphertext = await globalThis.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv, additionalData: Uint8Array.from(buildPayloadAad(path, seq, encryptionKeyId, validatedAt)).buffer },
-    encryptionKey,
-    new TextEncoder().encode(jsonBody)
-  )
-  const ivBase64 = Buffer.from(iv).toString('base64')
-  const ctBase64 = Buffer.from(new Uint8Array(ciphertext)).toString('base64')
-  const proof = await publishProof({ resource: path, version: seq, validatedAt,
-    scope: betaAuthEnforced() ? 'private' : 'public', body: ctBase64, iv: ivBase64, encryptionKeyId })
+  const payload = snapshots.get(path) ?? { id, name: `Product ${id}`, price: 9.99 }
+  const scope = betaAuthEnforced() ? 'private' as const : 'public' as const
+  const env = await snapshotEnvelope({ path, seq, payload, keyBytes: sessionKeyBytes, keyId: encryptionKeyId, scope })
+  return { path, seq, updatedAt, scope, env, jsonBody: canonicalSnapshot(payload) }
+}
 
-  return c.body(ctBase64, 200, {
+app.get('/api/products/:id', async (c) => {
+  const r = await resolveProduct(c)
+  if (!r.env) return r.response
+  const contentHash = createHash('sha256').update(r.jsonBody).digest('hex')
+  const priv = r.scope === 'private'
+  return c.body(r.env.ciphertext, 200, {
     'Content-Type': 'text/plain',
-    'Cache-Control': betaAuthEnforced() ? 'private, no-store' : 'no-cache',
-    [PROOF_HEADER]: proof,
-    'X-Nodex-Cache-Scope': betaAuthEnforced() ? 'private' : 'public',
-    'X-Nodex-Seq': String(seq),
-    'X-Nodex-Iv': ivBase64,
+    'Cache-Control': priv ? 'private, no-store' : 'no-cache',
+    [PROOF_HEADER]: r.env.proof,
+    'X-Nodex-Cache-Scope': r.scope,
+    'X-Nodex-Seq': String(r.seq),
+    'X-Nodex-Iv': r.env.iv,
     'X-Nodex-Key-Id': encryptionKeyId,
-    'X-Nodex-Version': String(seq),
-    'X-Nodex-Updated-At': String(updatedAt),
-    'X-Nodex-Validated-At': String(validatedAt),
+    'X-Nodex-Version': String(r.seq),
+    'X-Nodex-Updated-At': String(r.updatedAt),
+    'X-Nodex-Validated-At': String(r.env.validatedAt),
     'X-Nodex-Policy': 'bounded-staleness',
     'X-Nodex-Max-Stale-Versions': '2',
     'X-Nodex-Max-Stale-Ms': '5000',
     'X-Nodex-Content-Hash': 'sha256:' + contentHash,
-    'X-Nodex-Etag': '"v' + String(seq) + '"',
+    'X-Nodex-Etag': '"v' + String(r.seq) + '"',
   })
+})
+
+// GET /api/products/:id/proof — small signed renewal for a ciphertext the reader already holds
+app.get('/api/products/:id/proof', async (c) => {
+  const r = await resolveProduct(c)
+  if (!r.env) return r.response
+  return c.body(null, 204, renewalHeaders(r.env, r.seq, encryptionKeyId))
 })
 
 // POST /api/invalidate/:path{.+$} — bumps sequence counter for the given path

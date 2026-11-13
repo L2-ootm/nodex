@@ -143,7 +143,7 @@ async function decryptPayloadResponse(key: string, response: Response, seq: numb
     if (domainOf(identity) !== publisherDomain) return new Response('Publisher domain changed', { status: 503 })
     const ctBytes = Uint8Array.from(atob(ciphertext), (c) => c.charCodeAt(0))
     const ivBytes = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0))
-    const plaintext = await aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, seq, keyId, validatedAt))
+    const plaintext = await aesDecode(ctBytes, ivBytes, cryptoKey, buildPayloadAad(key, seq, keyId))
     return new Response(new TextDecoder().decode(plaintext), {
       status: response.status,
       statusText: response.statusText,
@@ -671,6 +671,33 @@ function admitted(key: string, seq: number, validatedAt: number, peer: boolean):
     sessionObservedVersion: observedVersionMap.get(key) ?? 0,
     latestKnownVersion: getLatestSeq(key), now: trustedNow() }).admitted
 }
+const PROOF_RENEWAL_TIMEOUT_MS = 3_000
+/**
+ * A cache or peer copy whose signed window has closed is renewed with a small proof from origin
+ * instead of refetching the payload. Accepted only if the renewal names the same version, IV, key
+ * and ciphertext digest as the held bytes; anything else returns null so the caller falls back to
+ * a full origin fetch. Verification of the renewed proof against the held ciphertext still runs
+ * in decryptPayloadResponse, so renewal can only extend freshness, never change content.
+ */
+async function renewedCandidate(key: string, response: Response, seq: number): Promise<Response | null> {
+  const held = decodeProof(response.headers.get(PROOF_HEADER))
+  if (!held) return response // Normal verification rejects it.
+  if (held.validUntil > trustedNow()) return response
+  try {
+    const renewal = await fetch(new Request(new URL(`${key}/proof`, self.location.origin), {
+      cache: 'no-store', signal: AbortSignal.timeout(PROOF_RENEWAL_TIMEOUT_MS) }))
+    if (!renewal.ok || renewal.type === 'opaque') return null
+    const fresh = decodeProof(renewal.headers.get(PROOF_HEADER))
+    const validatedAt = Number(renewal.headers.get('X-Nodex-Validated-At'))
+    if (!fresh || fresh.kind !== 'content' || fresh.scope !== 'public' || fresh.resource !== key ||
+      fresh.version !== seq || fresh.iv !== held.iv || fresh.encryptionKeyId !== held.encryptionKeyId ||
+      fresh.digest !== held.digest || fresh.validatedAt !== validatedAt) return null
+    const headers = new Headers(response.headers)
+    headers.set(PROOF_HEADER, renewal.headers.get(PROOF_HEADER)!)
+    headers.set('X-Nodex-Validated-At', String(validatedAt))
+    return new Response(await response.clone().text(), { status: response.status, headers })
+  } catch { return null }
+}
 async function acceptResponse(key: string, response: Response, start: number,
   source: 'sw-cache' | 'peer-fetch' | 'server-fallback', store: boolean, signal?: AbortSignal,
   requestId: string = crypto.randomUUID(),
@@ -678,8 +705,14 @@ async function acceptResponse(key: string, response: Response, start: number,
   anchorOrigin = false,
 ): Promise<Response | null> {
   const seq = Number(response.headers.get('X-Nodex-Seq'))
-  const validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
+  let validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
   if (!Number.isSafeInteger(seq) || seq < 1 || !Number.isSafeInteger(validatedAt) || validatedAt < 1) return null
+  if (source !== 'server-fallback') {
+    const renewed = await renewedCandidate(key, response, seq)
+    if (!renewed) return null
+    response = renewed
+    validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
+  }
   const decoded = await decryptPayloadResponse(key, response, seq, anchorOrigin && source === 'server-fallback')
   if (!decoded.ok) return decoded
   const proof = decodeProof(response.headers.get(PROOF_HEADER))!

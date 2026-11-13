@@ -95,6 +95,86 @@ describe('origin-calibrated freshness clock', () => {
   })
 })
 
+describe('proof renewal for held ciphertext', () => {
+  async function held(seq: number, ageMs: number, body = 'AA==') {
+    const validatedAt = Date.now() - ageMs
+    const proof = await publishProof({ resource: '/api/products/1', version: seq, validatedAt,
+      body, iv: 'AA==', encryptionKeyId: 'test-aes' })
+    return { body, validatedAt, proof, headers: {
+      'X-Nodex-Seq': String(seq), 'X-Nodex-Validated-At': String(validatedAt), 'X-Nodex-Iv': 'AA==',
+      'X-Nodex-Key-Id': 'test-aes', 'X-Nodex-Cache-Scope': 'public', [PROOF_HEADER]: proof } }
+  }
+  async function renewal(seq: number, body = 'AA==') {
+    const validatedAt = Date.now()
+    const proof = await publishProof({ resource: '/api/products/1', version: seq, validatedAt,
+      body, iv: 'AA==', encryptionKeyId: 'test-aes' })
+    return new Response(null, { status: 204, headers: { [PROOF_HEADER]: proof,
+      'X-Nodex-Validated-At': String(validatedAt), 'X-Nodex-Seq': String(seq) } })
+  }
+  function routeFetch(renewals: Array<Response | 'fail'>) {
+    const urls: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (request: string | Request) => {
+      const url = typeof request === 'string' ? request : request.url
+      urls.push(url)
+      if (url.endsWith('/api/publisher-key')) return Response.json((await getPublisher()).identity)
+      if (url.endsWith('/api/products/1/proof')) {
+        const next = renewals.shift()
+        if (!next || next === 'fail') return new Response('unavailable', { status: 503 })
+        return next
+      }
+      return responses.shift() ?? new Response('unavailable', { status: 503 })
+    }))
+    return urls
+  }
+  const serveCached = async (seq: number, ageMs: number, body?: string) => {
+    const h = await held(seq, ageMs, body)
+    state.cached.mockResolvedValue({ response: new Response(h.body, { headers: h.headers }), seq })
+  }
+
+  it('serves an expired cached copy after a matching renewal without refetching the payload', async () => {
+    await serveCached(5, 10_000)
+    const urls = routeFetch([await renewal(5)])
+    const response = await read()
+    expect(response.status).toBe(200)
+    expect(urls.filter(u => u.endsWith('/api/products/1'))).toEqual([])
+    expect(urls.some(u => u.endsWith('/api/products/1/proof'))).toBe(true)
+  })
+
+  it('falls back to a full origin fetch when the renewal names different bytes', async () => {
+    await serveCached(5, 10_000)
+    responses.push(await origin(5))
+    const urls = routeFetch([await renewal(5, 'AQ==')])
+    expect((await read()).status).toBe(200)
+    expect(urls.filter(u => u.endsWith('/api/products/1')).length).toBe(1)
+  })
+
+  it('falls back to a full origin fetch when the renewal names a newer version', async () => {
+    await serveCached(5, 10_000)
+    responses.push(await origin(6))
+    const urls = routeFetch([await renewal(6)])
+    const response = await read()
+    expect(response.status).toBe(200)
+    expect(response.headers.get('X-Nodex-Seq')).toBe('6')
+    expect(urls.filter(u => u.endsWith('/api/products/1')).length).toBe(1)
+  })
+
+  it('never admits an expired copy when renewal is unavailable', async () => {
+    await serveCached(5, 10_000)
+    responses.push(await origin(7))
+    const urls = routeFetch(['fail'])
+    const response = await read()
+    expect(response.headers.get('X-Nodex-Seq')).toBe('7')
+    expect(urls.filter(u => u.endsWith('/api/products/1')).length).toBe(1)
+  })
+
+  it('does not call the renewal route for a still-fresh copy', async () => {
+    await serveCached(5, 500)
+    const urls = routeFetch([])
+    expect((await read()).status).toBe(200)
+    expect(urls.some(u => u.endsWith('/proof'))).toBe(false)
+  })
+})
+
 describe('verified SW read pipeline', () => {
   it('keeps verified origin reads usable with an explicit volatile guarantee when storage cannot boot', async () => {
     state.unavailable = true

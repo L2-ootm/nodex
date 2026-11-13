@@ -13,6 +13,8 @@ Date: 2026-11-13. Simulator evidence only; no real-network measurement exists.
 
 **Known loss region (H4a).** At hypothetical prices Nodex costs more than the CDN for payloads of 64 KiB or less, long-tail keys and short sessions. It must self-disable there. Cost win is modelled only near 1 MiB per version (H4b), with worse p95 latency. Prices are invented; replace them with a customer invoice before any dollar claim.
 
+**Implementation status of H2.** The detached proof (F24 in REPAIR_VALIDATION.md) now exists in the code. H2 remains a hypothesis: the 0.29x byte ratio is simulator output and has not been measured on the implementation. The next measurement is billed origin bytes per reader-hour from `test:beta-real`-style runs against a TTL=5 s baseline.
+
 ## 2. Prior work and delta (citations from memory, NOT yet verified)
 
 Closest: TUF timestamp role (freeze and rollback protection over untrusted mirrors), Signed HTTP Exchanges, IPNS records, Peer5/Streamroot-style P2P delivery, Maygh (EuroSys 2013). Claimed delta: seconds-scale windows instead of hours or days, per-epoch monotonic barrier, ephemeral browser mirrors, and a quantified cost of the guarantee. The mechanism is not new; the regime and the measurement are. Verify each citation and read each paper before using any novelty wording.
