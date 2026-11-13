@@ -7,6 +7,9 @@ import {
   connections,
   extractPeerTelemetryFromStats,
   pendingRequests,
+  MAX_PENDING_PEER_REQUESTS,
+  MAX_PEER_BUFFERED_BYTES,
+  sendCacheFetchRequest,
   peerManager,
   selectConnectedPeer,
   isPolitePeer,
@@ -24,6 +27,46 @@ describe('p2p-manager', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  describe('F17 request and backpressure caps', () => {
+    const fakeConn = (readyState: string, bufferedAmount: number) => {
+      const send = vi.fn()
+      return { send, conn: { peerId: 'p', cacheFetch: { readyState, bufferedAmount, send } } as never }
+    }
+    const fakePort = () => ({ postMessage: vi.fn(), close: vi.fn() })
+
+    it('rejects without sending when pending requests are at the cap', () => {
+      for (let i = 0; i < MAX_PENDING_PEER_REQUESTS; i++) {
+        pendingRequests.set(`r${i}`, { peerId: 'p', resolver: () => {} })
+      }
+      const { send, conn } = fakeConn('open', 0)
+      const port = fakePort()
+      sendCacheFetchRequest(conn, 'k', port as never)
+      expect(send).not.toHaveBeenCalled()
+      expect(port.postMessage).toHaveBeenCalledWith({ type: 'P2P_FETCH_RESPONSE', found: false })
+      expect(pendingRequests.size).toBe(MAX_PENDING_PEER_REQUESTS)
+    })
+
+    it('rejects when the data channel buffer exceeds the limit or is not open', () => {
+      for (const [state, buffered] of [['open', MAX_PEER_BUFFERED_BYTES + 1], ['closing', 0]] as const) {
+        const { send, conn } = fakeConn(state, buffered)
+        const port = fakePort()
+        sendCacheFetchRequest(conn, 'k', port as never)
+        expect(send).not.toHaveBeenCalled()
+        expect(port.postMessage).toHaveBeenCalledWith({ type: 'P2P_FETCH_RESPONSE', found: false })
+      }
+      expect(pendingRequests.size).toBe(0)
+    })
+
+    it('sends and registers a pending request when under every limit', () => {
+      vi.useFakeTimers()
+      const { send, conn } = fakeConn('open', MAX_PEER_BUFFERED_BYTES)
+      sendCacheFetchRequest(conn, 'k', fakePort() as never)
+      expect(send).toHaveBeenCalledTimes(1)
+      expect(pendingRequests.size).toBe(1)
+      vi.useRealTimers()
+    })
   })
 
   it('reqId correlation routes response to correct resolver', () => {

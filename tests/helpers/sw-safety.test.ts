@@ -63,6 +63,38 @@ beforeEach(async () => {
 })
 afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs() })
 
+describe('origin-calibrated freshness clock', () => {
+  for (const skew of [60_000, -60_000]) {
+    it(`admits a fresh origin read when the client wall clock is ${skew > 0 ? 'ahead' : 'behind'} by 60 s`, async () => {
+      const response = await origin(1)
+      const real = Date.now()
+      vi.spyOn(Date, 'now').mockReturnValue(real + skew)
+      responses.push(response)
+      expect((await read()).status).toBe(200)
+      vi.restoreAllMocks()
+    })
+  }
+  // KNOWN LIMIT (characterization, flip when fixed): the first origin response after a worker start
+  // sets the clock, so a validly signed old response served to that no-store request is admitted.
+  it('KNOWN LIMIT: an old signed first origin response is admitted and anchors the clock in the past', async () => {
+    const validatedAt = Date.now() - 30_000
+    const body = 'AA=='
+    const proof = await publishProof({ resource: '/api/products/1', version: 1, validatedAt,
+      body, iv: 'AA==', encryptionKeyId: 'test-aes' })
+    responses.push(new Response(body, { headers: {
+      'X-Nodex-Seq': '1', 'X-Nodex-Validated-At': String(validatedAt), 'X-Nodex-Iv': 'AA==',
+      'X-Nodex-Key-Id': 'test-aes', 'X-Nodex-Cache-Scope': 'public', [PROOF_HEADER]: proof } }))
+    expect((await read()).status).toBe(200)
+  })
+  it('bypasses HTTP caches until anchored, then allows normal caching', async () => {
+    responses.push(await origin(1), await origin(2))
+    await read(); await read()
+    const productCalls = (fetch as any).mock.calls
+      .map(([r]: [Request | string]) => r).filter((r: any) => typeof r !== 'string' && r.url.endsWith('/api/products/1'))
+    expect(productCalls.map((r: Request) => r.cache)).toEqual(['no-store', 'default'])
+  })
+})
+
 describe('verified SW read pipeline', () => {
   it('keeps verified origin reads usable with an explicit volatile guarantee when storage cannot boot', async () => {
     state.unavailable = true

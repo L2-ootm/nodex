@@ -79,7 +79,7 @@ app.post('/api/signal/gossip-seed', async c => {
   if (!serviceAuthorized(c.req.raw)) return c.json({ error: 'publisher service credential required' }, 401)
   const body = await c.req.json().catch(() => null)
   if (!body || body.tenantId !== tenant() || typeof body.key !== 'string' ||
-    !/^\/api\/products\/[a-zA-Z0-9_-]+$/.test(body.key) || !Number.isSafeInteger(body.seq) || body.seq < 1 ||
+    !/^\/api\/products\/[a-zA-Z0-9_-]{1,200}$/.test(body.key) || !Number.isSafeInteger(body.seq) || body.seq < 1 ||
     typeof body.eventId !== 'string' || body.eventId.length > 160 || !body.eventId) return c.json({ error: 'invalid publication' }, 400)
   const room = body.roomId === undefined ? '*' : id(body.roomId)
   if (!room) return c.json({ error: 'invalid room' }, 400)

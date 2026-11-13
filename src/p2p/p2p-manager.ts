@@ -859,14 +859,17 @@ function askSwToServe(key: string): Promise<{ found: boolean; payload?: string; 
 // sendCacheFetchRequest — send over cache-fetch DC, reply on SW MessagePort
 // ---------------------------------------------------------------------------
 
-function sendCacheFetchRequest(
+export const MAX_PENDING_PEER_REQUESTS = 128
+export const MAX_PEER_BUFFERED_BYTES = 262_144
+
+export function sendCacheFetchRequest(
   conn: PeerConnection,
   key: string,
   replyPort: MessagePort
 ): void {
   const reqId = crypto.randomUUID()
 
-  if (pendingRequests.size >= 128 || conn.cacheFetch.readyState !== 'open' || conn.cacheFetch.bufferedAmount > 262_144) {
+  if (pendingRequests.size >= MAX_PENDING_PEER_REQUESTS || conn.cacheFetch.readyState !== 'open' || conn.cacheFetch.bufferedAmount > MAX_PEER_BUFFERED_BYTES) {
     replyPort.postMessage({ type: 'P2P_FETCH_RESPONSE', found: false })
     replyPort.close()
     return

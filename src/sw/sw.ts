@@ -35,6 +35,7 @@ import {
 import type { CacheMeta, VolatilityEntry } from '../shared/types.js'
 import { buildPayloadAad, decrypt as aesDecode } from '../crypto/crypto.js'
 import { decodeProof, verifyProof, PROOF_HEADER, type PublisherIdentity } from '../crypto/publisher-proof.js'
+import { anchorTrustedClock, hasTrustedAnchor, trustedNow } from './trusted-clock.js'
 import { computeScore, classifyTier, deriveTTL, recordActivity } from '../volatility/volatility.js'
 import {
   admitAuthoritativeMetadata,
@@ -116,7 +117,7 @@ async function recoverReaderKey(keyId: string): Promise<boolean> {
   })
 }
 
-async function decryptPayloadResponse(key: string, response: Response, seq: number): Promise<Response> {
+async function decryptPayloadResponse(key: string, response: Response, seq: number, anchorOrigin = false): Promise<Response> {
   const iv = response.headers.get('X-Nodex-Iv')
   const keyId = response.headers.get('X-Nodex-Key-Id') ?? ENCRYPTION_KEY_ID
   const validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
@@ -131,9 +132,12 @@ async function decryptPayloadResponse(key: string, response: Response, seq: numb
     const identity = proof ? await publisherIdentity(proof.signingKeyId) : null
     if (!proof || !identity || proof.version !== seq || proof.validatedAt !== validatedAt ||
       proof.iv !== iv || proof.encryptionKeyId !== keyId ||
-      !await verifyProof(proof, identity, key, 'content', ciphertext)) {
+      // A fresh no-store origin response is judged at its own signed time and then anchors the
+      // trusted clock; every other source is judged against that clock, never raw Date.now().
+      !await verifyProof(proof, identity, key, 'content', ciphertext, anchorOrigin ? proof.validatedAt : trustedNow())) {
       return new Response('Publisher verification failed', { status: 502 })
     }
+    if (anchorOrigin) anchorTrustedClock(proof.validatedAt)
     const cryptoKey = await ensureSessionKey(keyId)
     if (!cryptoKey) return new Response('Decrypt key unavailable', { status: 502 })
     if (domainOf(identity) !== publisherDomain) return new Response('Publisher domain changed', { status: 503 })
@@ -437,7 +441,7 @@ self.addEventListener('message', (event: ExtendableMessageEvent) => {
         await boot()
         const proof = decodeProof(event.data.proof ?? null)
         const identity = proof ? await publisherIdentity(proof.signingKeyId) : null
-        if (!proof || proof.scope !== 'public' || proof.version !== seq || !identity || !await verifyProof(proof, identity, key, 'invalidation')) {
+        if (!proof || proof.scope !== 'public' || proof.version !== seq || !identity || !await verifyProof(proof, identity, key, 'invalidation', undefined, trustedNow())) {
           // Unsigned gossip is only a rate-limited hint to consult our trusted origin.
           if (Date.now() - (hintRefresh.get(key) ?? 0) >= 1_000 && isPublicPath(key)) {
             if (hintRefresh.size >= 500 && !hintRefresh.has(key)) hintRefresh.delete(hintRefresh.keys().next().value!)
@@ -665,17 +669,18 @@ function admitted(key: string, seq: number, validatedAt: number, peer: boolean):
   return admitCandidate({ candidate: { key, version: seq, updatedAt: validatedAt, class: 'fresh-dynamic' },
     policy: peerReadsPolicyFromScore(scoreCache.get(key) ?? VOL_COLD_START),
     sessionObservedVersion: observedVersionMap.get(key) ?? 0,
-    latestKnownVersion: getLatestSeq(key), now: Date.now() }).admitted
+    latestKnownVersion: getLatestSeq(key), now: trustedNow() }).admitted
 }
 async function acceptResponse(key: string, response: Response, start: number,
   source: 'sw-cache' | 'peer-fetch' | 'server-fallback', store: boolean, signal?: AbortSignal,
   requestId: string = crypto.randomUUID(),
   trackPublicVersion = true,
+  anchorOrigin = false,
 ): Promise<Response | null> {
   const seq = Number(response.headers.get('X-Nodex-Seq'))
   const validatedAt = Number(response.headers.get('X-Nodex-Validated-At'))
   if (!Number.isSafeInteger(seq) || seq < 1 || !Number.isSafeInteger(validatedAt) || validatedAt < 1) return null
-  const decoded = await decryptPayloadResponse(key, response, seq)
+  const decoded = await decryptPayloadResponse(key, response, seq, anchorOrigin && source === 'server-fallback')
   if (!decoded.ok) return decoded
   const proof = decodeProof(response.headers.get(PROOF_HEADER))!
   const current = () => domainOf(proof) === publisherDomain
@@ -783,19 +788,23 @@ async function tryPeerFetch(key: string, start: number, requestId: string): Prom
 async function fetchAndCache(request: Request, key: string, start: number, store = false, requestId: string = crypto.randomUUID()): Promise<Response> {
   for (let attempt = 0; attempt < 2; attempt++) {
     let response: Response
+    // Until the clock is anchored the origin fetch must bypass HTTP caches: only a fresh response may anchor.
+    const noStore = attempt === 1 || !hasTrustedAnchor()
     try {
       response = await fetch(new Request(request, {
-        ...(attempt ? { cache: 'no-store' } : {}), signal: AbortSignal.timeout(5_000),
+        ...(noStore ? { cache: 'no-store' } : {}), signal: AbortSignal.timeout(5_000),
       }))
     } catch { return new Response('Origin unavailable', { status: 502 }) }
     if (!response.ok) return response
     if (response.type === 'opaque') return new Response('Authoritative version unavailable', { status: 503 })
-    const metadata = admitAuthoritativeMetadata(response.headers.get('X-Nodex-Seq'),
-      response.headers.get('X-Nodex-Validated-At'), 0)
+    const claimedAt = response.headers.get('X-Nodex-Validated-At')
+    // Unanchored: the claimed time is only a format check here; the publisher signature is verified next.
+    const metadata = admitAuthoritativeMetadata(response.headers.get('X-Nodex-Seq'), claimedAt, 0,
+      { now: hasTrustedAnchor() ? trustedNow() : Number(claimedAt) })
     if (metadata.admitted) {
       const url = new URL(request.url)
       const canonical = !url.search && !request.headers.has('Authorization') && !request.headers.has('Cookie') && shareableResponse(response)
-      const accepted = await acceptResponse(key, response, start, 'server-fallback', store, undefined, requestId, canonical)
+      const accepted = await acceptResponse(key, response, start, 'server-fallback', store, undefined, requestId, canonical, noStore)
       if (accepted) return accepted
     } else {
       await emitMetric({ type: 'admission-rejected', key, latency_ms: self.performance.now() - start,

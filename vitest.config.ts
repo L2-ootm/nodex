@@ -12,6 +12,7 @@ export default defineConfig({
       'src/p2p/**/*.test.ts',
       'src/sw/freshness.test.ts',
       'src/sw/cache.test.ts',
+      'src/sw/trusted-clock.test.ts',
       'src/dashboard/**/*.test.ts',
       'src/gossip/**/*.test.ts',
       'src/crypto/**/*.test.ts',
