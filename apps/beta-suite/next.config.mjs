@@ -3,6 +3,18 @@ const nextConfig = {
   // Repository instructions are maintained outside Next's generated files.
   agentRules: false,
   outputFileTracingRoot: process.cwd(),
+  async headers() {
+    // script-src is not restricted: Next's inline bootstrap scripts need a nonce pipeline first.
+    const security = [
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+      { key: 'Referrer-Policy', value: 'no-referrer' },
+      { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
+      { key: 'Content-Security-Policy', value: "frame-ancestors 'self'; base-uri 'self'; object-src 'none'; form-action 'self'" },
+      { key: 'Permissions-Policy', value: 'camera=(), microphone=(), geolocation=(), payment=()' },
+      { key: 'Strict-Transport-Security', value: 'max-age=31536000; includeSubDomains' },
+    ]
+    return [{ source: '/:path*', headers: security }]
+  },
   async rewrites() {
     // When deployed as the API project (nodex-beta-api), the root api/ handlers are the
     // destination — rewrites that point back to the same host create an infinite loop (508).

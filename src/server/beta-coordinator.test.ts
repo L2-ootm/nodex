@@ -149,6 +149,19 @@ describe('beta coordinator auth and evidence capture', () => {
     expect(ledger.notice).toContain('not a legal inventorship determination')
   })
 
+  it('throttles repeated failed logins per client address even when every guess differs', async () => {
+    const app = createBetaCoordinatorApp({ dataDir, inviteTokens: ['tester-token'], adminTokens: ['admin-token'] })
+    const attempt = (token: string, ip: string) => app.request('/api/beta/auth', {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'x-forwarded-for': ip } })
+    for (let i = 0; i < 10; i++) expect((await attempt(`guess-${i}`, '203.0.113.9')).status).toBe(401)
+    const blocked = await attempt('guess-next', '203.0.113.9')
+    expect(blocked.status).toBe(429)
+    expect(Number(blocked.headers.get('Retry-After'))).toBeGreaterThan(0)
+    // Even a correct token is refused while the address is throttled; another address is unaffected.
+    expect((await attempt('tester-token', '203.0.113.9')).status).toBe(429)
+    expect((await attempt('tester-token', '198.51.100.7')).status).toBe(200)
+  })
+
   it('detects token roles and restricts admin-only endpoints', async () => {
     const app = createBetaCoordinatorApp({
       dataDir,

@@ -1,0 +1,60 @@
+# Deployment and two-person test plan
+
+Written 2026-11-13 from read-only inspection of the Vercel account and sibling projects. Nothing was deployed or changed in production.
+
+## What exists today (verified)
+
+| Item | Finding |
+|---|---|
+| Hosting | Vercel team `l2works2-gmailcoms-projects`. Nodex runs as two projects: `nodex-beta` (Next.js tester UI, `https://nodex-beta.vercel.app`, last production deploy 21 days ago) and `nodex-beta-api` (`https://nodex-beta-api.vercel.app`, 166 days ago). A third, `beta-suite`, is older (171 days) and probably legacy. |
+| Domain pattern | Sibling projects use `*.vercel.app` for tools and a custom domain for client-facing work (`l2systems.com.br`, subdomain `criaturas.l2systems.com.br`). Nodex has no custom domain. Not needed for the test. |
+| Cloudflare | Used by `L2-SECRETARY` and `Meselo` (Workers config in `wrangler.jsonc`). Nodex does not use it, and `wrangler whoami` showed no logged-in account on this machine. Not needed for the test. |
+| TURN | `nodex-beta-api` has `NODEX_TURN_URLS`, `NODEX_TURN_USERNAME`, `NODEX_TURN_CREDENTIAL` set. Whether the current route accepts these names is unverified: `.env.example` documents `NODEX_TURN_SHARED_SECRET`. |
+| Deployed code | Pre-dates the v3 freshness protocol (signed time, detached proofs, renewal, peer proof exchange). The deployed API will not serve the protocol this branch tests. |
+
+## Blockers before a real test (verified by variable names only; values were not read)
+
+`nodex-beta-api` production lacks the variables the v3 server requires in production mode, so `getPublisher()` would throw on the first read:
+`NODEX_PUBLISHER_PRIVATE_JWK`, `NODEX_TENANT_ID` (must be a UUID), `NODEX_PUBLISHER_EPOCH` (explicit, not `development`), `NODEX_SESSION_KEY_HEX`, `NODEX_SEQUENCE_DRIVER=supabase`, `NODEX_SIGNALING_SEED_TOKEN`.
+
+Also found:
+- `nodex-beta` (the UI project) holds `NODEX_BETA_ADMIN_TOKENS` and `NODEX_BETA_TOKENS`. `apps/beta-suite/README.md` says the frontend must not hold these. Remove them from that project after confirming the UI does not read them.
+- Supabase migrations in `supabase/migrations/` must be applied in order to the database the API points at. Whether they are current there is unknown.
+- Vercel and Supabase plan tiers are unknown (not exposed by the CLI calls used). Check both dashboards for function duration, bandwidth and database limits before relying on a long run.
+
+## Limits that matter for a two-person run
+
+- Next front limiter (`apps/beta-suite/proxy.ts`, per process): signaling 1200/min, products 200/min, time 30/min, session key 20/min. One reader at 1 read/s uses 60/min of the products budget, so two people are far under it.
+- API per-credential limits (`api/lib/rate-limit.ts`) are per serverless instance, not global.
+- New in this change: failed sign-ins are throttled per client IP (10 failures, then 429 for 10 minutes), per instance. The pre-existing lockout is per token hash and does not slow a guesser who changes the token each time.
+- Signaling is HTTP polling, so Vercel's lack of WebSocket support is not a constraint.
+
+## Plan
+
+Owner actions are marked (you); the rest I can do on request.
+
+1. (you) Approve a production deploy. It creates secrets and changes the live API for anyone using the old beta; nothing here was done without that.
+2. Generate keys: `npm run keys:generate` (writes an ignored `.env.keys.local`, never prints secrets). Import the values into `nodex-beta-api` as production secrets. Set tenant UUID, an explicit epoch, `NODEX_SEQUENCE_DRIVER=supabase`.
+3. Apply `supabase/migrations/*.sql` in order. Confirm anonymous access is off.
+4. Run `npm run config:production` locally against the production environment (structural check only).
+5. Deploy the API project and the UI project from this branch together (`npm run beta:next:build` for the UI), then run `npm run verify:deployed-p2p` against the deployed URLs.
+6. Mint two invitations in Admin, Tokens: one admin (you), one tester (friend). Send the friend's token privately.
+7. Rehearse alone: two browser profiles on your machine, both signed in, a shared room, the in-app guide. Fix anything that fails before involving the friend.
+8. Run with the friend by following the in-app guide at `/guide` (same steps as below). Run twice: home to home, then the friend on a phone hotspot.
+9. Revoke the friend's token. Record results with `research/friend-test/analyze.mjs` and write them into the claim document, including failures.
+
+## The test, in short
+
+The page `/guide` (no sign-in needed) holds the step-by-step and a preflight (browser support, server reachability, signed clock, connection type). Two tools overlap and serve different purposes:
+- Beta suite rooms (`/admin/runs`, `/room`, `/run`, `/evidence`): enrollment, shared room, presence, evidence receipt.
+- `research/friend-test` harness (`STEER.md` section 7, thresholds in `prereg-friend.json`): the pre-registered measurement that can falsify the freshness bound and test whether peers connect. Freeze the thresholds before the first counted run.
+
+Pass or fail is decided in advance: any read older than 6 s plus measured clock slack, or any version rollback, fails the freshness claim. Peer connection feasibility is judged separately and cannot support the cost claim, which the compression audit already failed.
+
+## Security posture of the page after this change
+
+- Invitation field hidden by default, with Show; no autofill or spellcheck.
+- Invitation kept in the tab only unless "Remember me" is ticked (existing sessions that were remembered stay remembered).
+- Failed sign-ins throttled per IP; the page explains a 429.
+- Response headers: `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: SAMEORIGIN`, `frame-ancestors 'self'`, `base-uri`, `object-src`, `form-action`, `Permissions-Policy`, HSTS. Same-origin framing is required because the run page embeds the protocol runtime in an iframe.
+- Not done: no script-src policy (Next's inline bootstrap needs a nonce pipeline first); tokens are bearer secrets sent in a header, not passwords; throttling is per instance; no multi-factor.

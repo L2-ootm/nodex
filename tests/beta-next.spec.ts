@@ -615,3 +615,56 @@ test('admin creates, revokes, and monitors tokens through routed pages', async (
   await expect(page.getByText('Playwright Tester')).toBeVisible()
   await expect(page.getByText('2/10 visible')).toBeVisible()
 })
+
+async function mockAuth(page: import('@playwright/test').Page) {
+  await page.route('**/api/beta/auth', route => route.fulfill({ status: 200, contentType: 'application/json',
+    body: JSON.stringify({ role: 'tester', tokenPreview: 'playwright...oken', invite: null }) }))
+}
+
+test('sign-in hides and forgets the invitation by default, and the guide works without signing in', async ({ page }) => {
+  await mockAuth(page)
+  await page.goto('/')
+  const field = page.getByLabel('Invitation token')
+  await expect(field).toHaveAttribute('type', 'password')
+  await page.getByRole('button', { name: 'Show' }).click()
+  await expect(field).toHaveAttribute('type', 'text')
+  await field.fill('nodex-tester-local-development')
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page).toHaveURL(/\/setup$/)
+  const where = await page.evaluate(() => ({
+    local: localStorage.getItem('nodex-next-auth-v1') !== null, session: sessionStorage.getItem('nodex-next-auth-v1') !== null }))
+  expect(where).toEqual({ local: false, session: true })
+
+  await page.context().clearCookies()
+  await page.evaluate(() => sessionStorage.clear())
+  await page.goto('/guide')
+  await expect(page.getByRole('heading', { name: /Test Nodex with a friend/ })).toBeVisible()
+  expect(await page.getByRole('listitem').filter({ hasText: /^Both people|^Owner|^Friend|^Both/ }).count()).toBeGreaterThanOrEqual(6)
+  await page.getByRole('button', { name: 'Run checks' }).click()
+  await expect(page.getByText('Server reachable:')).toBeVisible()
+  await expect(page.getByText('Service Worker:')).toBeVisible()
+  const response = await page.request.get('/guide')
+  expect(response.headers()['x-content-type-options']).toBe('nosniff')
+  expect(response.headers()['x-frame-options']).toBe('SAMEORIGIN')
+})
+
+test('remember me keeps the invitation across tabs', async ({ page }) => {
+  await mockAuth(page)
+  await page.goto('/')
+  await page.getByLabel('Invitation token').fill('nodex-tester-local-development')
+  await page.getByLabel(/Remember me/).check()
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page).toHaveURL(/\/setup$/)
+  const where = await page.evaluate(() => ({
+    local: localStorage.getItem('nodex-next-auth-v1') !== null, session: sessionStorage.getItem('nodex-next-auth-v1') !== null }))
+  expect(where).toEqual({ local: true, session: false })
+})
+
+test('sign-in explains a throttled address', async ({ page }) => {
+  await page.route('**/api/beta/auth', route => route.fulfill({ status: 429, contentType: 'application/json',
+    headers: { 'Retry-After': '540' }, body: JSON.stringify({ error: 'too many failed attempts' }) }))
+  await page.goto('/')
+  await page.getByLabel('Invitation token').fill('anything')
+  await page.getByRole('button', { name: 'Continue' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'Too many failed attempts' })).toBeVisible()
+})

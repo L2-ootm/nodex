@@ -1559,9 +1559,28 @@ export function createBetaCoordinatorApp(options: BetaCoordinatorOptions): Hono 
     allowed_origins_configured: allowedOrigins.size,
   }))
 
+  // shortcut: per-instance memory keyed by client IP. The per-token lockout in authorize() cannot slow a
+  // guesser who changes the token each try; this does. Move to a shared store for a hard global ceiling.
+  const loginFailures = new Map<string, { count: number; resetAt: number }>()
+  const LOGIN_FAILURE_LIMIT = 10
+  const LOGIN_WINDOW_MS = 10 * 60_000
   app.post('/api/beta/auth', async (c) => {
+    const ip = requestMeta(c).ipAddress ?? 'unknown'
+    const now = Date.now()
+    if (loginFailures.size > 5_000) for (const [k, v] of loginFailures) if (v.resetAt <= now) loginFailures.delete(k)
+    if (loginFailures.size > 5_000) loginFailures.clear()
+    const seen = loginFailures.get(ip)
+    if (seen && seen.resetAt > now && seen.count >= LOGIN_FAILURE_LIMIT) {
+      return c.json({ error: 'too many failed attempts' }, 429,
+        { 'Retry-After': String(Math.ceil((seen.resetAt - now) / 1000)), 'Cache-Control': 'no-store' })
+    }
     const auth = await authorize(c.req.header('Authorization'), requestMeta(c))
-    if (!auth) return c.json({ error: 'invalid beta token' }, 401)
+    if (!auth) {
+      const entry = seen && seen.resetAt > now ? seen : { count: 0, resetAt: now + LOGIN_WINDOW_MS }
+      entry.count++
+      loginFailures.set(ip, entry)
+      return c.json({ error: 'invalid beta token' }, 401)
+    }
     return c.json({
       role: auth.role,
       tokenPreview: previewToken(auth.token),

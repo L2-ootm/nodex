@@ -50,8 +50,18 @@ function legacyProfileKey(auth: StoredAuth): string {
   return `nodex-next-profile-v1:${auth.tokenPreview}`
 }
 
+function readSessionJson<T>(key: string): T | null {
+  try {
+    const raw = sessionStorage.getItem(key)
+    return raw ? JSON.parse(raw) as T : null
+  } catch {
+    return null
+  }
+}
+
+/** The invitation lives in this tab only unless the person chose "Remember on this device". */
 export function readAuth(): StoredAuth | null {
-  cachedAuth = readJson<StoredAuth>(AUTH_KEY)
+  cachedAuth = readSessionJson<StoredAuth>(AUTH_KEY) ?? readJson<StoredAuth>(AUTH_KEY)
   return cachedAuth
 }
 
@@ -59,14 +69,20 @@ export function readCachedAuth(): StoredAuth | null {
   return cachedAuth
 }
 
-export function writeAuth(auth: StoredAuth): void {
+/** `remember` omitted keeps wherever the session already lives (tab-only by default). */
+export function writeAuth(auth: StoredAuth, remember?: boolean): void {
   cachedAuth = auth
-  writeJson(AUTH_KEY, auth)
+  const persist = remember ?? (() => { try { return localStorage.getItem(AUTH_KEY) !== null } catch { return false } })()
+  try {
+    if (persist) { writeJson(AUTH_KEY, auth); sessionStorage.removeItem(AUTH_KEY) }
+    else { sessionStorage.setItem(AUTH_KEY, JSON.stringify(auth)); localStorage.removeItem(AUTH_KEY) }
+  } catch { /* Storage blocked: the session works until reload. */ }
 }
 
 export function clearAll(): void {
   cachedAuth = null
   localStorage.removeItem(AUTH_KEY)
+  try { sessionStorage.removeItem(AUTH_KEY) } catch { /* ignore */ }
   localStorage.removeItem(SESSION_KEY)
   localStorage.removeItem(LOG_KEY)
   localStorage.removeItem(ROOM_OPEN_KEY)

@@ -988,3 +988,28 @@ pre {
   .trace-footer b { text-align: left; }
   .diagnostics-card p { grid-template-columns: 1fr; }
 }
+
+.secret-field { display: flex; gap: .5rem; align-items: stretch; }
+.secret-field input { flex: 1; min-width: 0; }
+.check-row { display: flex; gap: .6rem; align-items: flex-start; color: var(--muted); }
+.check-row input { width: auto; margin-top: .25rem; }
+.check-row small { display: block; opacity: .8; }
+.security-notes { margin: 1.25rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: .9rem; line-height: 1.55; }
+.security-notes a, .guide-page a { color: var(--cyan-2); text-decoration: underline; }
+
+.guide-page { max-width: 880px; margin: 0 auto; padding: 6.5rem clamp(1rem, 3vw, 2rem) 4rem; }
+.guide-page h1 { font-size: clamp(2rem, 5vw, 3rem); margin: .3rem 0 .75rem; }
+.guide-page > p { color: var(--muted); line-height: 1.6; }
+.guide-card { border: 1px solid var(--line); border-radius: 22px; padding: 1.25rem 1.5rem; margin: 1.25rem 0;
+  background: linear-gradient(180deg, rgba(13, 23, 36, .96), rgba(5, 11, 18, .96)); }
+.guide-card h2 { margin: 0 0 .5rem; font-size: 1.15rem; }
+.guide-steps { list-style: none; counter-reset: step; padding: 0; margin: 0; }
+.guide-steps li { counter-increment: step; position: relative; padding: 1rem 0 1rem 3rem; border-top: 1px solid var(--line); line-height: 1.55; }
+.guide-steps li:first-child { border-top: 0; }
+.guide-steps li::before { content: counter(step); position: absolute; left: 0; top: 1rem; width: 2rem; height: 2rem; display: grid; place-items: center;
+  border: 1px solid rgba(105, 245, 255, .55); border-radius: 50%; color: var(--cyan-2); font-weight: 700; }
+.guide-steps em { color: var(--muted); font-style: normal; display: block; font-size: .9rem; }
+.check-list { list-style: none; padding: 0; margin: .75rem 0 0; display: grid; gap: .5rem; }
+.check-list li { display: flex; gap: .6rem; align-items: baseline; }
+.check-dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--muted); flex: none; }
+.check-dot.ok { background: #55d68a; } .check-dot.warn { background: #f2c66d; } .check-dot.bad { background: #ff6f7d; }
