@@ -27,6 +27,8 @@ Scope: repair of audit F01–F21 against base `fc90d6f2dab9bdacfe31ebd59edf8791d
 | F19 future OCC/ignored payload | Exact base equality, canonical payload, retry identity and atomic payload/version/outbox commit; reads return committed data. | authority tests, `api/write/snapshot.test.ts`, `supabase/tests/snapshot_contracts.sql` |
 | F20 SVG injection | Escape participant names before SVG markup. | `src/dashboard/beta.test.ts` |
 | F21 duplicate/missing measurements | Stable delivery IDs, transactional buffers, deduplication, SDK attribution, ordered matched workloads and control coverage gate. | metric dedup tests, economic ledger tests, beta adoption tests, real browser run |
+| F22 wall-clock freshness reference | Freshness windows use an origin-anchored monotonic clock (`src/sw/trusted-clock.ts`); only a no-store origin response may anchor, the anchor never moves backward, peers/signaling/cache never anchor, and until anchored origin fetches bypass HTTP caches. Not covered: SW restart loses the anchor (falls back to wall clock); `p2p-manager.ts:100` page-side invalidation check still uses wall clock; `cache:'no-store'` does not bypass a CDN edge. | `src/sw/trusted-clock.test.ts`, `tests/helpers/sw-safety.test.ts` (client clock +/-60 s, cache-mode before/after anchor) |
+| F17 caps (test gap closed) | 128 pending requests and 262,144 buffered bytes are named constants and asserted. | `src/p2p/p2p-manager.test.ts` |
 
 ## Additional defects corrected during repair
 
@@ -43,12 +45,12 @@ Scope: repair of audit F01–F21 against base `fc90d6f2dab9bdacfe31ebd59edf8791d
 | Check | Result and scope |
 | --- | --- |
 | `npm run typecheck` | Passed root, SW, server/API/scripts and Next checks. |
-| `npm run test:unit` | 324 tests passed across 46 files, including publisher configuration, SW concurrency/storage/key recovery and explicit economic-coverage regressions. |
+| `npm run test:unit` | 336 tests passed across 47 files (2026-11-13 re-verification), including publisher configuration, SW concurrency/storage/key recovery and explicit economic-coverage regressions. |
 | Root Chromium suite (`npm test`) | 57 passed; one pre-existing ICE-restart scenario remains skipped. |
 | `npm run test:beta-next` | 7 passed with UI fixtures; not protocol proof. |
-| `npm run test:beta-real` | 3 passed using real loopback API, encryption, HTTP signaling, SW and local persistence; includes two-browser peer delivery and worker-stop key recovery with authorized key access. |
+| `npm run test:beta-real` | 3 passed (re-run 2026-11-13, twice consecutively after making the suite reset its own data directory; before that fix a second run on the same directory failed at evidence submit with a stale session) using real loopback API, encryption, HTTP signaling, SW and local persistence; includes two-browser peer delivery and worker-stop key recovery with authorized key access. |
 | Runtime/Next builds | Passed through the browser harness. Built SW classic-script check passed; gzip 9,357 bytes at the final runtime measurement. |
-| `npm audit` | Zero reported vulnerabilities in the project's installed dependency graph at verification time. |
+| `npm audit` | 2026-11-13: 8 remaining (2 low, 6 moderate, none high). `hono` 4.13.18 and `npm audit fix` cleared the high `undici` advisory. Remaining: build-time `workbox`/`glob`/`minimatch`/`deepmerge` chain (fix offered is a downgrade) and `@hono/node-server` (major; `serveStatic` is not used in this repo, second advisory not yet assessed). Earlier zero-vulnerability result is superseded. |
 | PostgreSQL/WASM migration execution | All eight migrations applied and reapplied; 15 harness assertions plus both permanent SQL contract files passed. One connection; not deployed Supabase. |
 | Key/config tools | Exclusive key-file creation and duplicate-write rejection passed. Production structural validation passed with offline synthetic service configuration; no live credential or network validation. |
 | Documented local command | `npm run beta:local` started successfully; app, SW, metrics runtime, signed product route and publisher identity returned 200 through Next. Owned processes stopped afterward. |

@@ -29,7 +29,7 @@ npm test
 npm audit
 ```
 
-`test:beta-next` uses UI fixtures. `test:beta-real` uses real loopback APIs, encryption, HTTP signaling, Service Workers and persistence. The root browser suite includes the legacy WebSocket research harness. Build rejects a Service Worker that cannot run as a classic script or exceeds its 50 KiB gzip budget. Browser tests use isolated API ports; ports 4173, 4175 and 4176 must be free. Run suites sequentially because builds share artifacts.
+`test:beta-next` uses UI fixtures. `test:beta-real` uses real loopback APIs, encryption, HTTP signaling, Service Workers and persistence. The root browser suite (`npm test`) includes the legacy WebSocket research harness and `tests/beta-web.spec.ts`, which uses route mocks and is therefore not evidence of real-server behavior. Build rejects a Service Worker that cannot run as a classic script or exceeds its 50 KiB gzip budget. Browser tests use isolated API ports; ports 4173, 4175 and 4176 must be free. Run suites sequentially because builds share artifacts.
 
 ## Protocol contract
 

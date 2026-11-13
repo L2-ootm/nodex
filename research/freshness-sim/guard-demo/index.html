@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nodex Guard: is your cache showing old prices?</title>
+<!-- The entire customer integration on the page side is this one line. Append ?mode=enforce to the URL to flip it. -->
+<script>document.write('<script src="/guard.js" data-routes="/cdn/api/products/" data-fresh="/origin/api/products/" data-mode="' + (new URLSearchParams(location.search).get('mode') === 'enforce' ? 'enforce' : 'shadow') + '"><\/script>')</script>
+<style>
+  :root { --ink:#101418; --mute:#5b6570; --line:#d9dee3; --ok:#0b7a4b; --bad:#b3261e; --bg:#f6f7f8; --card:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --ink:#e8ecef; --mute:#97a1ab; --line:#2a3138; --ok:#4cc38a; --bad:#ff8a80; --bg:#0e1114; --card:#161a1e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui, sans-serif; color:var(--ink); background:var(--bg); }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; } p { color: var(--mute); margin: 0 0 20px; }
+  .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; min-width:0; }
+  .label { font-size:12px; letter-spacing:.04em; text-transform:uppercase; color:var(--mute); }
+  .price { font: 600 34px/1.1 ui-monospace, monospace; margin: 6px 0; font-variant-numeric: tabular-nums; }
+  .verdict { display:flex; align-items:center; gap:8px; font-weight:600; overflow-wrap:anywhere; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--mute); flex:none; transition: background-color 180ms cubic-bezier(.2,.8,.2,1), transform 180ms cubic-bezier(.2,.8,.2,1); }
+  .fresh { color:var(--ok); } .fresh .dot { background:var(--ok); }
+  .stale, .forged, .unsigned { color:var(--bad); } .stale .dot, .forged .dot, .unsigned .dot { background:var(--bad); transform: scale(1.25); }
+  /* Age bar: fills over the signed window, snaps red when the window is exceeded. */
+  .bar { height:4px; background:var(--line); border-radius:2px; margin-top:12px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:0; background:var(--ok); transition: width 400ms linear, background-color 120ms linear; }
+  .bar i.over { background:var(--bad); }
+  @media (prefers-reduced-motion: reduce) { .dot, .bar i { transition: none; } .stale .dot, .forged .dot, .unsigned .dot { transform:none; } }
+  table { width:100%; border-collapse:collapse; margin-top:20px; font-variant-numeric: tabular-nums; }
+  td, th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); } th { color:var(--mute); font-weight:500; font-size:12px; }
+  button { font:inherit; padding:8px 12px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--ink); cursor:pointer; }
+  button:focus-visible, a:focus-visible { outline:2px solid var(--ok); outline-offset:2px; }
+  code { font: 13px ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Is your cache showing old prices?</h1>
+  <p>Mode: <strong id="mode"></strong>. The page polls the same product through a cache that keeps responses too long. The origin signs each response as current for 5 s; the guard checks that signature in the browser. <a id="flip" href="?mode=enforce">Switch mode</a></p>
+  <div class="row">
+    <section class="card" aria-labelledby="l1">
+      <div class="label" id="l1">What the page received</div>
+      <div class="price" id="price">--</div>
+      <div class="verdict" id="verdict" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="vtext">waiting for first read</span></div>
+      <div class="bar" aria-hidden="true"><i id="age"></i></div>
+    </section>
+    <section class="card" aria-labelledby="l2">
+      <div class="label" id="l2">Receipt so far</div>
+      <table>
+        <tr><th>Verified current</th><td id="c-fresh">0</td></tr>
+        <tr><th>Stale beyond the signed window</th><td id="c-stale">0</td></tr>
+        <tr><th>Worst overrun</th><td id="c-worst">0 ms</td></tr>
+        <tr><th>Replaced with a fresh read (enforce)</th><td id="c-replaced">0</td></tr>
+        <tr><th>Altered or unsigned</th><td id="c-forged">0</td></tr>
+      </table>
+    </section>
+  </div>
+  <p style="margin-top:20px"><button id="tamper" type="button">Request an altered response</button> <span id="tamper-out" role="status"></span></p>
+  <noscript>This demo needs JavaScript.</noscript>
+</main>
+<script>
+  const $ = id => document.getElementById(id)
+  const mode = NodexGuard.config.mode
+  $('mode').textContent = mode === 'enforce' ? 'enforce (stale responses are replaced)' : 'shadow (report only)'
+  $('flip').href = mode === 'enforce' ? '?' : '?mode=enforce'
+  const text = { fresh: d => `Verified current, signed ${d.ageMs} ms ago`, stale: d => `Stale: ${d.overMs} ms past its signed window`, forged: () => 'Altered or unverifiable', unsigned: () => 'Unsigned response' }
+  addEventListener('nodex:verdict', e => {
+    const d = e.detail
+    if (d.path.startsWith('/cdn/')) {
+      $('verdict').className = 'verdict ' + d.status
+      $('vtext').textContent = text[d.status](d) + (mode === 'enforce' && d.status !== 'fresh' ? ' - replaced before display' : '')
+      const pct = d.ageMs == null ? 100 : Math.min(100, d.ageMs / 50)
+      $('age').style.width = pct + '%'; $('age').classList.toggle('over', d.status !== 'fresh')
+    }
+    $('c-fresh').textContent = d.counts.fresh; $('c-stale').textContent = d.counts.stale
+    $('c-worst').textContent = d.worstStaleMs + ' ms'; $('c-forged').textContent = d.counts.forged + d.counts.unsigned
+    setTimeout(() => { $('c-replaced').textContent = NodexGuard.counts.replaced }, 300)
+  })
+  async function poll() {
+    if (document.hidden) return
+    try { const r = await fetch('/cdn/api/products/1'); $('price').textContent = '$' + (await r.json()).price }
+    catch (err) { $('price').textContent = '--'; $('vtext').textContent = navigator.onLine ? 'Blocked: no current response available' : 'Offline: showing nothing rather than an old price' }
+  }
+  poll(); setInterval(poll, 2000)
+  $('tamper').addEventListener('click', async () => {
+    const saved = NodexGuard.config.routes
+    NodexGuard.config.routes = '/tampered/api/products/'
+    try { await fetch('/tampered/api/products/1'); $('tamper-out').textContent = mode === 'enforce' ? 'Altered body detected and replaced.' : 'Altered body detected (shadow mode lets it through).' }
+    catch { $('tamper-out').textContent = 'Altered body blocked.' }
+    NodexGuard.config.routes = saved
+  })
+</script>
+</body>
+</html>
