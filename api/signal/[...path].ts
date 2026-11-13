@@ -5,6 +5,7 @@ import { cors } from 'hono/cors'
 import { bodyLimit } from 'hono/body-limit'
 import { GOSSIP_TTL } from '../../src/shared/config.js'
 import { validateBetaToken, unauthorizedResponse } from '../lib/auth.js'
+import { rateLimited } from '../lib/rate-limit.js'
 import { executeSignal, type SignalCommand } from '../../src/server/http-signaling-store.js'
 import { publishProof } from '../../src/server/publisher.js'
 import { getSequenceAuthority } from '../../src/server/sequence-authority-provider.js'
@@ -14,6 +15,11 @@ export const config = { runtime: 'nodejs' }
 export const app = new Hono()
 app.use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'Authorization', 'X-Nodex-Node-Grant'] }))
 app.use('*', bodyLimit({ maxSize: 128 * 1024 }))
+// Per credential per minute. Steady-state polling is about 4/min and discovery bursts at 1/s for 20 s.
+app.use('/api/signal/join', rateLimited(30))
+app.use('/api/signal/leave', rateLimited(30))
+app.use('/api/signal/send', rateLimited(120))
+app.use('/api/signal/poll', rateLimited(180))
 app.onError((_error, c) => c.json({ error: 'signaling unavailable' }, 503))
 function id(value: unknown): string | null {
   return typeof value === 'string' && /^[a-zA-Z0-9._-]{1,160}$/.test(value) && value !== 'server' ? value : null

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { validateBetaToken, unauthorizedResponse } from './lib/auth.js'
+import { rateLimited } from './lib/rate-limit.js'
 import type { IceServerConfig } from '../src/shared/config.js'
 import { createHash, createHmac } from 'node:crypto'
 
@@ -37,6 +38,7 @@ app.onError(() => new Response(JSON.stringify({ error: 'TURN configuration unava
   status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
 }))
 
+app.use('/api/turn-credentials', rateLimited(20))
 app.get('/api/turn-credentials', async (c) => {
   if (!await validateBetaToken(c.req.raw, 'tester')) {
     return c.newResponse(unauthorizedResponse().body, 401, {

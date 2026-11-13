@@ -3,6 +3,7 @@ import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { configuredSessionKey } from '../src/server/session-key.js'
 import { validateBetaToken, unauthorizedResponse } from './lib/auth.js'
+import { rateLimited } from './lib/rate-limit.js'
 
 export const config = { runtime: 'nodejs' }
 
@@ -12,6 +13,7 @@ app.onError(() => new Response(JSON.stringify({ error: 'session key unavailable'
 }))
 app.use('*', cors({ origin: '*', exposeHeaders: ['X-Nodex-Commit'] }))
 
+app.use('/api/session-key', rateLimited(30))
 app.get('/api/session-key', async (c) => {
   if (!await validateBetaToken(c.req.raw, 'tester')) {
     return c.newResponse(unauthorizedResponse().body, 401, {
