@@ -4,3 +4,6 @@ payload_plaintext_bytes,full_response_bytes,renewal_response_bytes,renewal_fract
 8192,12086,839,0.069
 32768,44858,839,0.019
 61440,83086,839,0.010
+
+renewal_burst_requests,ecdsa_signatures,elapsed_ms
+500,1,54

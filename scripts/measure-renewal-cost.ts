@@ -19,3 +19,20 @@ for (const size of [256, 1024, 8 * 1024, 32 * 1024, 60 * 1024]) {
   rows.push(`${size},${fullBytes},${renewalBytes},${(renewalBytes / fullBytes).toFixed(3)}`)
 }
 console.log(rows.join('\n'))
+
+// Signing load: a burst of renewal requests for one key should cost O(1) signatures per reuse window.
+const subtle = globalThis.crypto.subtle
+const realSign = subtle.sign.bind(subtle)
+let signs = 0
+subtle.sign = ((...args: Parameters<typeof realSign>) => {
+  const name = typeof args[0] === 'string' ? args[0] : args[0].name
+  if (name === 'ECDSA') signs++ // HMAC IV derivations are counted separately and are cheap
+  return realSign(...args)
+}) as typeof subtle.sign
+const burst = 500
+const path = '/api/products/burst'
+seqCounters.set(path, 1)
+const started = performance.now()
+await Promise.all(Array.from({ length: burst }, () => app.request(`${path}/proof`)))
+const elapsedMs = performance.now() - started
+console.log(`\nrenewal_burst_requests,ecdsa_signatures,elapsed_ms\n${burst},${signs},${elapsedMs.toFixed(0)}`)

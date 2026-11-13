@@ -5,6 +5,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { app, seqCounters, sessionKeyBytes } from './mock-api.js'
 import { buildPayloadAad } from '../crypto/crypto.js'
+import { PROOF_REUSE_MS } from './snapshot-envelope.js'
 import { decodeProof, verifyProof, PROOF_HEADER, type PublisherIdentity } from '../crypto/publisher-proof.js'
 
 describe('mock-api', () => {
@@ -164,8 +165,10 @@ describe('mock-api', () => {
     const get = await app.request('/api/products/7')
     const ct = await get.text()
     const held = decodeProof(get.headers.get(PROOF_HEADER))!
-    await new Promise(r => setTimeout(r, 5))
+    const realNow = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(realNow + PROOF_REUSE_MS + 500)
     const renewal = await app.request('/api/products/7/proof')
+    clock.mockRestore()
     expect(renewal.status).toBe(204)
     const fresh = decodeProof(renewal.headers.get(PROOF_HEADER))!
     expect(fresh.digest).toBe(held.digest)
@@ -264,12 +267,12 @@ describe('mock-api — version metadata headers (IMPL-01)', () => {
     expect(Number(updatedAt!)).toBeGreaterThan(0)
   })
 
-  it('X-Nodex-Validated-At is a fresh epoch timestamp', async () => {
+  it('X-Nodex-Validated-At is an epoch timestamp no older than the proof reuse window', async () => {
     const before = Date.now()
     const res = await app.request('/api/products/1')
     const validatedAt = Number(res.headers.get('X-Nodex-Validated-At'))
     expect(Number.isSafeInteger(validatedAt)).toBe(true)
-    expect(validatedAt).toBeGreaterThanOrEqual(before)
+    expect(validatedAt).toBeGreaterThanOrEqual(before - PROOF_REUSE_MS)
     expect(validatedAt).toBeLessThanOrEqual(Date.now())
   })
 
