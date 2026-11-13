@@ -15,9 +15,17 @@ Date: 2026-11-13. Simulator evidence only; no real-network measurement exists.
 
 **Implementation status of H2.** The detached proof (F24 in REPAIR_VALIDATION.md) now exists in the code. H2 remains a hypothesis: the 0.29x byte ratio is simulator output and has not been measured on the implementation. The next measurement is billed origin bytes per reader-hour from `test:beta-real`-style runs against a TTL=5 s baseline.
 
-## 2. Prior work and delta (citations from memory, NOT yet verified)
+## 2. Prior work and delta
 
-Closest: TUF timestamp role (freeze and rollback protection over untrusted mirrors), Signed HTTP Exchanges, IPNS records, Peer5/Streamroot-style P2P delivery, Maygh (EuroSys 2013). Claimed delta: seconds-scale windows instead of hours or days, per-epoch monotonic barrier, ephemeral browser mirrors, and a quantified cost of the guarantee. The mechanism is not new; the regime and the measurement are. Verify each citation and read each paper before using any novelty wording.
+Verified by web search on 2026-11-13 (search summaries, not a read of each paper; read before citing):
+
+- **Maygh** (Zhang, Zhou, Mislove, Sundaram, EuroSys 2013, pp. 281-294): browsers of visiting users serve static content to each other under an operator-run coordinator; content is identified by hash; evaluated by replaying one week of Akamai image logs from etsy.com in simulation (about 75 % bandwidth reduction at the 95th percentile, per the authors' poster). This is the closest system and already covers browser peers with hash integrity for static content. Nodex cannot claim "browser CDN" novelty.
+- **TUF timestamp role**: a regularly re-signed timestamp that makes freeze (replayed outdated metadata) and rollback attacks detectable. Nodex's renewable proof is the same idea at a seconds scale.
+- **IPNS records**: signed records with an RFC 3339 end-of-life validity; selection prefers the highest sequence number and latest EOL; implementations separate a cache TTL from validity (kubo defaults of 24 h EOL and 1 min TTL come from an issue tracker, not the spec).
+
+Not verified: Signed HTTP Exchanges validity limit (believed to be at most seven days; the "Response lifespan" appendix of the IETF draft was not read); Peer5 and Streamroot (not searched).
+
+Claimed delta, restated against what is verified: Maygh addresses static, hash-addressed content, where staleness is not a problem. Nodex targets versioned dynamic snapshots, so its contribution is the freshness guarantee (signed window of at most 5 s, calibrated clock, per-epoch monotonic barrier, renewal of held bytes) and its measured cost. TUF and IPNS supply the signing and validity pattern; the regime (seconds) and the browser-mirror setting are the difference. Required before any novelty wording: read Maygh and the TUF specification in full and write the comparison against them.
 
 ## 3. Threat model (research scope)
 
