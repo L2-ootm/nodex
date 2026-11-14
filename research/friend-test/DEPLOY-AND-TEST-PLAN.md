@@ -65,3 +65,21 @@ Pass or fail is decided in advance: any read older than 6 s plus measured clock 
 - Production `SUPABASE_URL` and `SUPABASE_SECRET_KEY` on `nodex-beta-api` are empty strings. They still have to be set (secret key from the dashboard, never printed or committed).
 - Migrations through `20260714010633` were already applied. The five `20261002*` migrations were missing and are now applied. Check: 10 nodex/beta functions, 17 public tables, 0 without RLS, 13 MB. The migrations history table was not updated (applied via the SQL editor, not the CLI).
 - Cloudflare D1 (wrangler logged in): 7 databases, about 2 MB total. D1 is not used by Nodex and a port is not planned: the server relies on Postgres functions for atomic sequence, snapshot, signaling, token and outbox work.
+
+## Update 2026-11-13 (later): production deployment, as done
+
+Hosting plan is Vercel Hobby: at most 12 serverless functions per deployment. Both projects are deployed from a local git clone of the branch (so Vercel records the checkout), always with `-e NODEX_DEPLOY_COMMIT=<sha> --build-env NODEX_DEPLOY_COMMIT=<sha>` because CLI deploys get no `VERCEL_GIT_COMMIT_SHA`.
+
+- `nodex-beta-api` (API): the clone's `vercel.json` is replaced by `{"framework":null,"buildCommand":"npm run build","outputDirectory":"dist","rewrites":[...]}` with one rewrite per catch-all (`/api/beta/:path+` to `/api/beta/[...path]`, same for signal, write, invalidate). Without the rewrites nested paths such as `/api/beta/tokens/:id/revoke` return 404 on this layout.
+- `nodex-beta` (UI): the clone has `api/` deleted so the Next rewrites forward `/api/*` to the API project. With `api/` present the UI project answered `/api/time` itself without the production secrets (503).
+- Repo changes needed to deploy: `api/lib` renamed `api/_lib` and `.vercelignore` for api tests (23 functions became 10), three `.js` import extensions in `src/server` (ESM resolution failed at runtime: `FUNCTION_INVOCATION_FAILED` on signaling), commit fallbacks in `api/session-key.ts` and `vite.config.ts`.
+- Production variables set on `nodex-beta-api` (secrets as sensitive): tenant id, epoch `authority-1`, publisher private key, session key, signaling seed token, admin token, Supabase URL and secret key, storage and sequence drivers, origins, signaling URLs, `NODEX_SKIP_API_REWRITES=1`, `NODEX_ALLOW_STATIC_TURN=true`. The credentials live only in the ignored `.env.keys.local` and in Vercel.
+- Admin and tester token variables removed from the `nodex-beta` UI project.
+- TURN: the existing static credentials point at the public Open Relay service (`openrelay.metered.ca`), shared and best effort, and static TURN credentials are visible to any signed-in tester. Acceptable for a two-person beta, not for anything larger. Set `NODEX_TURN_SHARED_SECRET` on a TURN server you control for a real product.
+- Existing token rows in Supabase from earlier testers (two testers) are still active; revoke them in Admin, Tokens if they should not work.
+
+### Verification result (`npm run verify:deployed-p2p`, target `https://nodex-beta.vercel.app/metrics.html`)
+
+Passed: deployment identity (app and API at the same commit), authenticated session key, signed time, signed writes (v1 to v4 acknowledged in 400 to 520 ms), two real headless browsers formed a WebRTC mesh over the deployed signaling with TURN configured, seed read 200.
+Failed at the last assertion: `connected mesh formed, but peer-fetch metric was not observed; metrics={"server-fallback":1}`. Node B read product 1 from the origin, not from node A. Not yet diagnosed: whether node A had cached the seed first, or whether the v3 peer path declined it. The mesh is real, the data path through it is not shown.
+The script's own manual `/api/signal/poll` returns 403 because it does not send the node grant header; the application client does, so this is a stale diagnostic in the script, not a server fault. A never-written product also returns 503 "Sequence authority unavailable" instead of 404.
