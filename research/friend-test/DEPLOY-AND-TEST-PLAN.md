@@ -83,3 +83,9 @@ Hosting plan is Vercel Hobby: at most 12 serverless functions per deployment. Bo
 Passed: deployment identity (app and API at the same commit), authenticated session key, signed time, signed writes (v1 to v4 acknowledged in 400 to 520 ms), two real headless browsers formed a WebRTC mesh over the deployed signaling with TURN configured, seed read 200.
 Failed at the last assertion: `connected mesh formed, but peer-fetch metric was not observed; metrics={"server-fallback":1}`. Node B read product 1 from the origin, not from node A. Not yet diagnosed: whether node A had cached the seed first, or whether the v3 peer path declined it. The mesh is real, the data path through it is not shown.
 The script's own manual `/api/signal/poll` returns 403 because it does not send the node grant header; the application client does, so this is a stale diagnostic in the script, not a server fault. A never-written product also returns 503 "Sequence authority unavailable" instead of 404.
+
+## Custom domains (attached in Vercel, DNS record still owner action)
+
+`nodex.l2systems.com.br` is attached to `nodex-beta` and `nodex-api.l2systems.com.br` to `nodex-beta-api`. `l2systems.com.br` is on Cloudflare DNS and the wrangler login is zone read-only, so the records were not created. Owner action in Cloudflare DNS, same pattern as `criaturas`: two CNAME records, `nodex` and `nodex-api`, both to `cname.vercel-dns.com`, DNS only (grey cloud).
+
+Switch-over, only after both names resolve and Vercel shows them valid: set `NODEX_BETA_APP_ORIGIN` and `NODEX_BETA_ALLOWED_ORIGINS` to the UI name and `NODEX_BETA_SIGNALING_URL` / `NODEX_BETA_SIGNALING_HTTP_URL` to `https://nodex-api.l2systems.com.br/api/signal` on the API project, set `NEXT_PUBLIC_NODEX_BETA_API_URL` on the UI project, redeploy both, rerun `rehearse-deployed.mjs --app ... --api ...`. Keep the `*.vercel.app` names working until then (allowed origins can list both, comma separated).
