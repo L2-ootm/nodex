@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
-import { loadProductEnvelope } from '../../lib/product-envelope.js'
+import { loadProductEnvelope } from '../../_lib/product-envelope.js'
 import { renewalHeaders } from '../../../src/server/snapshot-envelope.js'
 import { PROOF_HEADER } from '../../../src/crypto/publisher-proof.js'
-import { rateLimited } from '../../lib/rate-limit.js'
+import { rateLimited } from '../../_lib/rate-limit.js'
 
 export const config = { runtime: 'nodejs' }
 

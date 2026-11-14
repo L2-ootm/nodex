@@ -5,7 +5,7 @@ import { createBetaCoordinatorApp, parseInviteTokensWithMeta } from './beta-coor
 import { app as protocol } from './mock-api.js'
 import { app as signaling } from '../../api/signal/[...path].js'
 import { app as turn } from '../../api/turn-credentials.js'
-import { validateBetaToken } from '../../api/lib/auth.js'
+import { validateBetaToken } from '../../api/_lib/auth.js'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 

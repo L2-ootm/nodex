@@ -2,8 +2,8 @@ import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { configuredSessionKey } from '../src/server/session-key.js'
-import { validateBetaToken, unauthorizedResponse } from './lib/auth.js'
-import { rateLimited } from './lib/rate-limit.js'
+import { validateBetaToken, unauthorizedResponse } from './_lib/auth.js'
+import { rateLimited } from './_lib/rate-limit.js'
 
 export const config = { runtime: 'nodejs' }
 

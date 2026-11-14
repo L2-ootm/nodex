@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { bodyLimit } from 'hono/body-limit'
-import { validateBetaToken } from '../lib/auth.js'
+import { validateBetaToken } from '../_lib/auth.js'
 import { getSequenceAuthority } from '../../src/server/sequence-authority-provider.js'
 import { SequenceAuthorityInputError } from '../../src/server/sequence-authority.js'
 

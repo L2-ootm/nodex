@@ -3,7 +3,7 @@ import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { TIME_NONCE_PATTERN } from '../src/crypto/publisher-proof.js'
 import { publishTime } from '../src/server/publisher.js'
-import { rateLimited } from './lib/rate-limit.js'
+import { rateLimited } from './_lib/rate-limit.js'
 
 export const config = { runtime: 'nodejs' }
 

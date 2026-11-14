@@ -17,7 +17,7 @@ import { PROOF_HEADER, TIME_NONCE_PATTERN } from '../crypto/publisher-proof.js'
 import { getPeers } from './signaling-server.js'
 import { cloneSnapshot, MAX_SAFE_SEQUENCE } from './sequence-authority.js'
 import { bodyLimit } from 'hono/body-limit'
-import { validateBetaToken } from '../../api/lib/auth.js'
+import { validateBetaToken } from '../../api/_lib/auth.js'
 import nodePath from 'node:path'
 import { pathToFileURL } from 'node:url'
 

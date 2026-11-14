@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { handle } from 'hono/vercel'
 import { cors } from 'hono/cors'
 import { put, get } from '@vercel/blob'
-import { loadProductEnvelope } from '../lib/product-envelope.js'
+import { loadProductEnvelope } from '../_lib/product-envelope.js'
 import { PROOF_HEADER } from '../../src/crypto/publisher-proof.js'
 
 export const config = { runtime: 'nodejs' }
