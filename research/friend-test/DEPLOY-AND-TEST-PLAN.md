@@ -58,3 +58,10 @@ Pass or fail is decided in advance: any read older than 6 s plus measured clock 
 - Failed sign-ins throttled per IP; the page explains a 429.
 - Response headers: `nosniff`, `Referrer-Policy: no-referrer`, `X-Frame-Options: SAMEORIGIN`, `frame-ancestors 'self'`, `base-uri`, `object-src`, `form-action`, `Permissions-Policy`, HSTS. Same-origin framing is required because the run page embeds the protocol runtime in an iframe.
 - Not done: no script-src policy (Next's inline bootstrap needs a nonce pipeline first); tokens are bearer secrets sent in a header, not passwords; throttling is per instance; no multi-factor.
+
+## Update 2026-11-13: database state (verified in the Supabase dashboard and wrangler)
+
+- Supabase project `L2 TESTS` (free org, Nano compute) was paused. It was restored and reports Healthy.
+- Production `SUPABASE_URL` and `SUPABASE_SECRET_KEY` on `nodex-beta-api` are empty strings. They still have to be set (secret key from the dashboard, never printed or committed).
+- Migrations through `20260714010633` were already applied. The five `20261002*` migrations were missing and are now applied. Check: 10 nodex/beta functions, 17 public tables, 0 without RLS, 13 MB. The migrations history table was not updated (applied via the SQL editor, not the CLI).
+- Cloudflare D1 (wrangler logged in): 7 databases, about 2 MB total. D1 is not used by Nodex and a port is not planned: the server relies on Postgres functions for atomic sequence, snapshot, signaling, token and outbox work.
