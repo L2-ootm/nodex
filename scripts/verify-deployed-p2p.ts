@@ -350,7 +350,7 @@ async function main(): Promise<void> {
     }
 
     const seed = await pageA.evaluate(async () => {
-      const res = await fetch('/api/products/1', { cache: 'no-store' })
+      const res = await fetch('/api/products/1')
       return { ok: res.ok, status: res.status, seq: res.headers.get('X-Nodex-Seq') }
     })
     if (!seed.ok) throw new Error(`seed fetch failed with HTTP ${seed.status}`)
