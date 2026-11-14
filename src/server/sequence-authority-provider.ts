@@ -1,6 +1,6 @@
-import { SequenceAuthorityUnavailableError, type SequenceAuthority } from './sequence-authority'
-import { InMemorySequenceAuthority } from './in-memory-sequence-authority'
-import { createSupabaseSequenceAuthority } from './supabase-sequence-authority'
+import { SequenceAuthorityUnavailableError, type SequenceAuthority } from './sequence-authority.js'
+import { InMemorySequenceAuthority } from './in-memory-sequence-authority.js'
+import { createSupabaseSequenceAuthority } from './supabase-sequence-authority.js'
 
 export type SequenceAuthorityDriver = 'supabase' | 'memory'
 

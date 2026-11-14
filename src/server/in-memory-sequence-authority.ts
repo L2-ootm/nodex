@@ -9,7 +9,7 @@ import {
   type SequenceAuthority,
   type SequenceBump,
   type SequenceRecord,
-} from './sequence-authority'
+} from './sequence-authority.js'
 
 interface CommandRecord {
   resourceKey: string
