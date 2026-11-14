@@ -4,6 +4,8 @@ import path from 'path'
 import { execSync } from 'child_process'
 
 function getCommitHash(): string {
+  const fromEnv = (process.env['VERCEL_GIT_COMMIT_SHA'] || process.env['NODEX_DEPLOY_COMMIT'] || '').trim()
+  if (fromEnv) return fromEnv.slice(0, 12)
   try {
     return execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim()
   } catch {
