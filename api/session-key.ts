@@ -23,7 +23,7 @@ app.get('/api/session-key', async (c) => {
   const { bytes: keyBytes, keyId } = configuredSessionKey()
   c.header('Cache-Control', 'no-store')
   const keyB64 = Buffer.from(keyBytes).toString('base64')
-  c.header('X-Nodex-Commit', process.env['VERCEL_GIT_COMMIT_SHA']?.trim() || 'unknown')
+  c.header('X-Nodex-Commit', (process.env['VERCEL_GIT_COMMIT_SHA'] || process.env['NODEX_DEPLOY_COMMIT'])?.trim() || 'unknown')
   return c.json({ keyId, keyBytes: keyB64 })
 })
 
